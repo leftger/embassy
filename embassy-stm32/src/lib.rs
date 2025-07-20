@@ -115,6 +115,8 @@ pub mod sdmmc;
 pub mod spdifrx;
 #[cfg(spi)]
 pub mod spi;
+#[cfg(tamp)]
+pub mod tamp;
 #[cfg(tsc)]
 pub mod tsc;
 #[cfg(ucpd)]
