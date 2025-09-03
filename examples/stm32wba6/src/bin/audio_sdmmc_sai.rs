@@ -16,9 +16,14 @@ use embassy_usb::class::uac1;
 use embassy_usb::class::uac1::speaker::{self, Speaker};
 use embassy_usb::driver::EndpointError;
 use heapless::Vec;
-use micromath::F32Ext;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
+use embassy_time::{Duration, Timer};
+use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
+use embedded_sdmmc::{SdCard, VolumeManager};
+use embedded_sdmmc::filesystem::{ToShortFileName, ShortFileName};
+use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::spi::{self, Spi};
 
 bind_interrupts!(struct Irqs {
     USB_OTG_HS => usb::InterruptHandler<peripherals::USB_OTG_HS>;
@@ -38,14 +43,14 @@ pub const INPUT_CHANNEL_COUNT: usize = 2;
 pub const SAMPLE_RATE_HZ: u32 = 48_000;
 pub const FEEDBACK_COUNTER_TICK_RATE: u32 = 31_250_000;
 
-// Use 32 bit samples, which allow for a lot of (software) volume adjustment without degradation of quality.
-pub const SAMPLE_WIDTH: uac1::SampleWidth = uac1::SampleWidth::Width4Byte;
+// Use 16-bit samples for broad OS compatibility.
+pub const SAMPLE_WIDTH: uac1::SampleWidth = uac1::SampleWidth::Width2Byte;
 pub const SAMPLE_WIDTH_BIT: usize = SAMPLE_WIDTH.in_bit();
 pub const SAMPLE_SIZE: usize = SAMPLE_WIDTH as usize;
 pub const SAMPLE_SIZE_PER_S: usize = (SAMPLE_RATE_HZ as usize) * INPUT_CHANNEL_COUNT * SAMPLE_SIZE;
 
-// Size of audio samples per 1 ms - for the full-speed USB frame period of 1 ms.
-pub const USB_FRAME_SIZE: usize = SAMPLE_SIZE_PER_S.div_ceil(1000);
+// High-speed: size per 125 µs microframe (8000 microframes/s).
+pub const USB_FRAME_SIZE: usize = SAMPLE_SIZE_PER_S.div_ceil(8000);
 
 // Select front left and right audio channels.
 pub const AUDIO_CHANNELS: [uac1::Channel; INPUT_CHANNEL_COUNT] = [uac1::Channel::LeftFront, uac1::Channel::RightFront];
@@ -55,11 +60,11 @@ pub const USB_MAX_PACKET_SIZE: usize = 2 * USB_FRAME_SIZE;
 pub const USB_MAX_SAMPLE_COUNT: usize = USB_MAX_PACKET_SIZE / SAMPLE_SIZE;
 
 // The data type that is exchanged via the zero-copy channel (a sample vector).
-pub type SampleBlock = Vec<u32, USB_MAX_SAMPLE_COUNT>;
+pub type SampleBlock = Vec<u16, USB_MAX_SAMPLE_COUNT>;
 
-// Feedback is provided in 10.14 format for full-speed endpoints.
-pub const FEEDBACK_REFRESH_PERIOD: uac1::FeedbackRefresh = uac1::FeedbackRefresh::Period8Frames;
-const FEEDBACK_SHIFT: usize = 14;
+// HS feedback uses 16.16 format (samples per microframe). Refresh every 4 microframes.
+pub const FEEDBACK_REFRESH_PERIOD: uac1::FeedbackRefresh = uac1::FeedbackRefresh::Period4Frames;
+const FEEDBACK_SHIFT: usize = 16;
 
 const TICKS_PER_SAMPLE: f32 = (FEEDBACK_COUNTER_TICK_RATE as f32) / (SAMPLE_RATE_HZ as f32);
 
@@ -100,6 +105,7 @@ async fn feedback_handler<'d, T: usb::Instance + 'd>(
         packet.push(value as u8).unwrap();
         packet.push((value >> 8) as u8).unwrap();
         packet.push((value >> 16) as u8).unwrap();
+        packet.push((value >> 24) as u8).unwrap();
 
         feedback.write_packet(&packet).await?;
     }
@@ -123,7 +129,7 @@ async fn stream_handler<'d, T: usb::Instance + 'd>(
 
             for w in 0..word_count {
                 let byte_offset = w * SAMPLE_SIZE;
-                let sample = u32::from_le_bytes(usb_data[byte_offset..byte_offset + SAMPLE_SIZE].try_into().unwrap());
+                let sample = u16::from_le_bytes(usb_data[byte_offset..byte_offset + SAMPLE_SIZE].try_into().unwrap());
 
                 // Fill the sample buffer with data.
                 samples.push(sample).unwrap();
@@ -140,12 +146,126 @@ async fn stream_handler<'d, T: usb::Instance + 'd>(
 #[embassy_executor::task]
 async fn audio_playback_task(
     mut usb_audio_receiver: zerocopy_channel::Receiver<'static, NoopRawMutex, SampleBlock>,
-    mut sai_tx: Sai<'static, peripherals::SAI1, u32>,
+    mut sai_tx: Sai<'static, peripherals::SAI1, u16>,
 ) {
     loop {
         let samples = usb_audio_receiver.receive().await;
         let _ = sai_tx.write(&samples).await;
         usb_audio_receiver.receive_done();
+    }
+}
+
+type SdSpiDev = ExclusiveDevice<Spi<'static, embassy_stm32::mode::Async>, Output<'static>, NoDelay>;
+type SdCardDev = SdCard<SdSpiDev, embassy_time::Delay>;
+
+#[embassy_executor::task]
+async fn sd_stream_task(
+    mut sai_tx: Sai<'static, peripherals::SAI1, u16>,
+    volume_mgr: &'static mut VolumeManager<SdCardDev, DummyTimesource>,
+) {
+    // Open first FAT volume and stream WAV files back-to-back
+    let raw_vol = match volume_mgr.open_raw_volume(embedded_sdmmc::VolumeIdx(0)) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("SD open_raw_volume error: {:?}", defmt::Debug2Format(&e));
+            return;
+        }
+    };
+    let raw_root = match volume_mgr.open_root_dir(raw_vol) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("SD open_root_dir error: {:?}", defmt::Debug2Format(&e));
+            return;
+        }
+    };
+    // Collect WAV 8.3 names in root
+    let mut names: heapless::Vec<ShortFileName, 32> = heapless::Vec::new();
+    let _ = volume_mgr.iterate_dir(raw_root, |de| {
+        if !de.attributes.is_directory() && de.name.extension() == b"WAV" {
+            let _ = names.push(de.name.clone());
+        }
+    });
+
+    // Helper: parse minimal WAV header
+    fn parse_wav_header(h: &[u8]) -> Option<(u32, u16, u16, usize)> {
+        if h.len() < 44 { return None; }
+        if &h[0..4] != b"RIFF" || &h[8..12] != b"WAVE" { return None; }
+        if &h[12..16] != b"fmt " { return None; }
+        let fmt_size = u32::from_le_bytes([h[16],h[17],h[18],h[19]]);
+        if fmt_size < 16 { return None; }
+        let audio_fmt = u16::from_le_bytes([h[20],h[21]]);
+        let channels = u16::from_le_bytes([h[22],h[23]]);
+        let sample_rate = u32::from_le_bytes([h[24],h[25],h[26],h[27]]);
+        let bits = u16::from_le_bytes([h[34],h[35]]);
+        // Assume data chunk starts at 44 for PCM
+        if audio_fmt != 1 { return None; }
+        Some((sample_rate, channels, bits, 44))
+    }
+
+    // Simple 44.1k -> 48k linear resampler for interleaved u16 samples (all channels)
+    fn resample_441_to_480<'a>(in_samples: &'a [u16], out_buf: &mut heapless::Vec<u16, 1024>, channels: usize) {
+        // ratio = 160/147
+        let frames_in = in_samples.len() / channels;
+        let frames_out = (frames_in as u32 * 160 / 147) as usize;
+        out_buf.clear();
+        if frames_in < 2 { return; }
+        for fo in 0..frames_out {
+            let pos_num = fo as u32 * 147;
+            let i0 = (pos_num / 160) as usize;
+            let frac_num = (pos_num % 160) as u32; // 0..159
+            let i1 = (i0 + 1).min(frames_in - 1);
+            for ch in 0..channels {
+                let s0 = in_samples[i0*channels + ch] as i32;
+                let s1 = in_samples[i1*channels + ch] as i32;
+                let interp = s0 * (160 - frac_num) as i32 + s1 * frac_num as i32;
+                let val = (interp / 160) as i32;
+                let _ = out_buf.push(val.clamp(0, 0xFFFF) as u16);
+            }
+        }
+    }
+
+    // Play each WAV file in order
+    for name in names.iter() {
+        let mut hdr = [0u8; 44];
+        let raw_file = match volume_mgr.open_file_in_dir(raw_root, name.clone(), embedded_sdmmc::Mode::ReadOnly) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if volume_mgr.read(raw_file, &mut hdr).unwrap_or(0) < 44 { let _ = volume_mgr.close_file(raw_file); continue; }
+        let (sr, ch, bits, _data_off) = match parse_wav_header(&hdr) { Some(v) => v, None => continue };
+        if bits != 16 { warn!("Skipping non-16bit WAV"); continue; }
+        let channels = ch as usize;
+
+        let mut file_buf = [0u8; 1024];
+        let mut in_samples: heapless::Vec<u16, 512> = heapless::Vec::new();
+        let mut out_samples: heapless::Vec<u16, 1024> = heapless::Vec::new();
+
+        loop {
+            let n = match volume_mgr.read(raw_file, &mut file_buf) { Ok(n) => n, Err(_) => 0 };
+            if n == 0 { break; }
+            in_samples.clear();
+            let mut i = 0;
+            while i + 1 < n && in_samples.len() < in_samples.capacity() {
+                let s = u16::from_le_bytes([file_buf[i], file_buf[i+1]]);
+                let _ = in_samples.push(s);
+                i += 2;
+            }
+
+            if sr == 44_100 {
+                resample_441_to_480(&in_samples, &mut out_samples, channels);
+                let _ = sai_tx.write(&out_samples).await;
+            } else {
+                let _ = sai_tx.write(&in_samples).await;
+            }
+        }
+        let _ = volume_mgr.close_file(raw_file);
+    }
+}
+
+struct DummyTimesource();
+impl embedded_sdmmc::TimeSource for DummyTimesource {
+    fn get_timestamp(&self) -> embedded_sdmmc::Timestamp {
+        embedded_sdmmc::Timestamp { year_since_1970: 0, zero_indexed_month: 0, zero_indexed_day: 0, hours: 0, minutes: 0, seconds: 0 }
     }
 }
 
@@ -178,7 +298,32 @@ async fn usb_feedback_task(mut feedback: speaker::Feedback<'static, usb::Driver<
 
     loop {
         feedback.wait_connection().await;
-        _ = feedback_handler(&mut feedback, feedback_factor).await;
+        // Bootstrap Windows by sending a few constant 16.16 feedback values (6 samples per HS microframe at 48 kHz).
+        let fixed_16_16: u32 = ((SAMPLE_RATE_HZ as u32) << FEEDBACK_SHIFT) / 8000;
+        for _ in 0..8 {
+            let packet = [
+                (fixed_16_16 & 0xFF) as u8,
+                ((fixed_16_16 >> 8) & 0xFF) as u8,
+                ((fixed_16_16 >> 16) & 0xFF) as u8,
+                ((fixed_16_16 >> 24) & 0xFF) as u8,
+            ];
+            let _ = feedback.write_packet(&packet).await;
+        }
+        // Fallback: If our SOF-timed counter isn't firing (e.g., missing timer trigger), keep sending
+        // constant feedback at the declared refresh period so the host proceeds with streaming.
+        let period_us: u32 = (FEEDBACK_REFRESH_PERIOD.frame_count() as u32) * 125;
+        loop {
+            let packet = [
+                (fixed_16_16 & 0xFF) as u8,
+                ((fixed_16_16 >> 8) & 0xFF) as u8,
+                ((fixed_16_16 >> 16) & 0xFF) as u8,
+                ((fixed_16_16 >> 24) & 0xFF) as u8,
+            ];
+            if feedback.write_packet(&packet).await.is_err() {
+                break; // disconnected
+            }
+            Timer::after(Duration::from_micros(period_us as u64)).await;
+        }
     }
 }
 
@@ -299,8 +444,9 @@ async fn main(spawner: Spawner) {
     let state = STATE.init(speaker::State::new());
 
     // Create the driver, from the HAL, using the internal HS PHY.
-    static EP_OUT_BUFFER: StaticCell<[u8; 256]> = StaticCell::new();
-    let ep_out_buffer = EP_OUT_BUFFER.init([0u8; 256]);
+    const EP_OUT_BUF_LEN: usize = 64 + USB_MAX_PACKET_SIZE;
+    static EP_OUT_BUFFER: StaticCell<[u8; EP_OUT_BUF_LEN]> = StaticCell::new();
+    let ep_out_buffer = EP_OUT_BUFFER.init([0u8; EP_OUT_BUF_LEN]);
     let mut usb_cfg = embassy_stm32::usb::Config::default();
     usb_cfg.vbus_detection = false;
     let usb_driver = usb::Driver::new_hs(p.USB_OTG_HS, Irqs, p.PD6, p.PD7, ep_out_buffer, usb_cfg);
@@ -325,7 +471,7 @@ async fn main(spawner: Spawner) {
         &mut builder,
         state,
         USB_MAX_PACKET_SIZE as u16,
-        uac1::SampleWidth::Width4Byte,
+        uac1::SampleWidth::Width2Byte,
         &[SAMPLE_RATE_HZ],
         &AUDIO_CHANNELS,
         FEEDBACK_REFRESH_PERIOD,
@@ -340,19 +486,19 @@ async fn main(spawner: Spawner) {
 
     static CHANNEL: StaticCell<zerocopy_channel::Channel<'_, NoopRawMutex, SampleBlock>> = StaticCell::new();
     let channel = CHANNEL.init(zerocopy_channel::Channel::new(sample_blocks));
-    let (sender, receiver) = channel.split();
+    let (sender, _receiver) = channel.split();
 
     // Initialize SAI1 (I2S) for playback: SCK=PA7, FS=PA8, SD=PB12, DMA=GPDMA1_CH0
     let (sai_a, _sai_b) = sai::split_subblocks(p.SAI1);
 
-    static SAI_DMA_BUF: StaticCell<[u32; 1024]> = StaticCell::new();
-    let sai_dma_buf = SAI_DMA_BUF.init([0u32; 1024]);
+    static SAI_DMA_BUF: StaticCell<[u16; 2048]> = StaticCell::new();
+    let sai_dma_buf = SAI_DMA_BUF.init([0u16; 2048]);
 
     let mut sai_cfg = sai::Config::default();
     sai_cfg.mode = sai::Mode::Master;
     sai_cfg.tx_rx = sai::TxRx::Transmitter;
     sai_cfg.stereo_mono = sai::StereoMono::Stereo;
-    sai_cfg.data_size = sai::DataSize::Data32;
+    sai_cfg.data_size = sai::DataSize::Data16;
     sai_cfg.bit_order = sai::BitOrder::MsbFirst;
     sai_cfg.frame_sync_polarity = sai::FrameSyncPolarity::ActiveHigh;
     sai_cfg.frame_sync_offset = sai::FrameSyncOffset::OnFirstBit;
@@ -369,6 +515,32 @@ async fn main(spawner: Spawner) {
         sai_dma_buf,
         sai_cfg,
     );
+
+    // Set up SPI for microSD (SPI1: SCK=PB4, MOSI=PA15, MISO=PB3; CS=PA6). Adjust to your board wiring.
+    let mut spi_cfg = spi::Config::default();
+    spi_cfg.frequency = Hertz(400_000); // init at <= 400kHz
+    let spi = Spi::new(
+        p.SPI1,
+        p.PB4,
+        p.PA15,
+        p.PB3,
+        p.GPDMA1_CH4,
+        p.GPDMA1_CH5,
+        spi_cfg,
+    );
+    let cs = Output::new(p.PA6, Level::High, Speed::VeryHigh);
+    let spi_dev: SdSpiDev = ExclusiveDevice::new_no_delay(spi, cs).unwrap();
+    let mut sd: SdCardDev = SdCard::new(spi_dev, embassy_time::Delay);
+    info!("SD size {} bytes", sd.num_bytes().unwrap_or(0));
+
+    // Bump SPI after init
+    let mut spi_cfg2 = spi::Config::default();
+    spi_cfg2.frequency = Hertz(16_000_000);
+    sd.spi(|dev| dev.bus_mut().set_config(&spi_cfg2));
+
+    static VOLUME_MANAGER: StaticCell<VolumeManager<SdCardDev, DummyTimesource>> = StaticCell::new();
+    let vol_mgr: &'static mut VolumeManager<SdCardDev, DummyTimesource> =
+        VOLUME_MANAGER.init(VolumeManager::new(sd, DummyTimesource()));
 
     // Run a timer for counting between SOF interrupts.
     let mut tim = timer::low_level::Timer::new(p.TIM2);
@@ -401,5 +573,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(unwrap!(usb_streaming_task(stream, sender)));
     spawner.spawn(unwrap!(usb_feedback_task(feedback)));
     spawner.spawn(unwrap!(usb_task(usb_device)));
-    spawner.spawn(unwrap!(audio_playback_task(receiver, sai_tx)));
+
+    // Start SD streaming task to play AUDIO.WAV from microSD via SAI.
+    spawner.spawn(unwrap!(sd_stream_task(sai_tx, vol_mgr)));
 }
