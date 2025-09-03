@@ -19,6 +19,9 @@ use embassy_stm32::spi::{self, Spi};
 type SdSpiDev = ExclusiveDevice<Spi<'static, embassy_stm32::mode::Async>, Output<'static>, NoDelay>;
 type SdCardDev = SdCard<SdSpiDev, embassy_time::Delay>;
 
+const USE_TEST_TONE: bool = true; // Set to false to play from SD card
+const USE_LEFT_JUSTIFIED: bool = false; // Set true to try Left-Justified framing
+
 #[embassy_executor::task]
 async fn sd_stream_task(
     mut sai_tx: Sai<'static, peripherals::SAI1, u16>,
@@ -155,6 +158,49 @@ impl embedded_sdmmc::TimeSource for DummyTimesource {
 
 // (USB tasks removed for SD-only example)
 
+#[embassy_executor::task]
+async fn sai_test_tone_task(
+    mut sai_tx: Sai<'static, peripherals::SAI1, u16>,
+    mut led: Output<'static>,
+) {
+    info!("Starting 1 kHz test tone");
+    // Precompute a continuous square wave buffer to avoid gaps between transfers.
+    const SAMPLE_RATE: u32 = 48_000;
+    const TONE_FREQ: u32 = 1_000;
+    const HALF_PERIOD_SAMPLES: usize = (SAMPLE_RATE / (2 * TONE_FREQ)) as usize; // 24 samples
+    const STEREO_SAMPLES: usize = 4096; // u16 stereo samples in buffer (must be even)
+
+    static STEREO_BUF: StaticCell<[u16; STEREO_SAMPLES]> = StaticCell::new();
+    let buf = STEREO_BUF.init([0u16; STEREO_SAMPLES]);
+
+    let amplitude: i16 = 20000;
+    let pos: u16 = (amplitude as i16) as u16;
+    let neg: u16 = (-amplitude as i16) as u16;
+
+    // Fill buffer with stereo square wave (1 kHz)
+    let mut sample_idx: usize = 0; // mono sample index within half-period
+    let mut current: u16 = pos;
+    for i in (0..STEREO_SAMPLES).step_by(2) {
+        buf[i] = current;     // Left
+        buf[i + 1] = current; // Right
+        sample_idx += 1;
+        if sample_idx >= HALF_PERIOD_SAMPLES {
+            sample_idx = 0;
+            current = if current == pos { neg } else { pos };
+        }
+    }
+
+    let mut writes_since_toggle: u32 = 0;
+    loop {
+        let _ = sai_tx.write(buf).await;
+        writes_since_toggle += 1;
+        if writes_since_toggle >= 64 {
+            writes_since_toggle = 0;
+            led.toggle();
+        }
+    }
+}
+
 /// Feedback value measurement and calculation
 ///
 /// Used for measuring/calculating the number of samples that were received from the host during the
@@ -222,9 +268,16 @@ async fn main(spawner: Spawner) {
     sai_cfg.stereo_mono = sai::StereoMono::Stereo;
     sai_cfg.data_size = sai::DataSize::Data16;
     sai_cfg.bit_order = sai::BitOrder::MsbFirst;
-    // I2S framing compatible with common I2S DACs/codecs (32 bits per channel = 64 BCLK per LRCLK)
-    sai_cfg.frame_sync_polarity = sai::FrameSyncPolarity::ActiveHigh;
-    sai_cfg.frame_sync_offset = sai::FrameSyncOffset::OnFirstBit;
+    // Configure framing
+    if USE_LEFT_JUSTIFIED {
+        // Left-Justified: WS high = left, data MSB on WS edge
+        sai_cfg.frame_sync_polarity = sai::FrameSyncPolarity::ActiveHigh;
+        sai_cfg.frame_sync_offset = sai::FrameSyncOffset::OnFirstBit;
+    } else {
+        // I2S: WS low = left, data MSB one BCLK after WS edge
+        sai_cfg.frame_sync_polarity = sai::FrameSyncPolarity::ActiveLow;
+        sai_cfg.frame_sync_offset = sai::FrameSyncOffset::BeforeFirstBit;
+    }
     sai_cfg.frame_length = 64;
     sai_cfg.frame_sync_active_level_length = sai::word::U7(32);
     sai_cfg.fifo_threshold = sai::FifoThreshold::Quarter;
@@ -272,6 +325,12 @@ async fn main(spawner: Spawner) {
     let vol_mgr: &'static mut VolumeManager<SdCardDev, DummyTimesource> =
         VOLUME_MANAGER.init(VolumeManager::new(sd, DummyTimesource()));
 
-    // Start SD streaming task to play WAV files from microSD via SAI.
-    spawner.spawn(sd_stream_task(sai_tx, vol_mgr).expect("spawn sd_stream_task"));
+    if USE_TEST_TONE {
+        // Run tone generator instead of SD streaming
+        let led = Output::new(p.PD8, Level::Low, Speed::Low);
+        spawner.spawn(unwrap!(sai_test_tone_task(sai_tx, led)));
+    } else {
+        // Start SD streaming task to play WAV files from microSD via SAI.
+        spawner.spawn(unwrap!(sd_stream_task(sai_tx, vol_mgr)));
+    }
 }
