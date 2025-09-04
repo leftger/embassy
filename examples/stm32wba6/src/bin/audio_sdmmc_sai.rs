@@ -13,13 +13,15 @@ use embedded_sdmmc::{SdCard, VolumeManager};
 use embedded_sdmmc::filesystem::ShortFileName;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::spi::{self, Spi};
+use libm::sinf;
+// (PWM diagnostics removed)
 
 // This example plays WAV files from microSD to SAI.
 
 type SdSpiDev = ExclusiveDevice<Spi<'static, embassy_stm32::mode::Async>, Output<'static>, NoDelay>;
 type SdCardDev = SdCard<SdSpiDev, embassy_time::Delay>;
 
-const USE_TEST_TONE: bool = true; // Set to false to play from SD card
+const USE_TEST_TONE: bool = false; // Set to false to play from SD card
 const USE_LEFT_JUSTIFIED: bool = false; // Set true to try Left-Justified framing
 
 #[embassy_executor::task]
@@ -28,6 +30,9 @@ async fn sd_stream_task(
     volume_mgr: &'static mut VolumeManager<SdCardDev, DummyTimesource>,
 ) {
     info!("SD stream task started");
+    // Periodic log of last sample sent to SAI
+    let mut next_log = embassy_time::Instant::now() + embassy_time::Duration::from_secs(1);
+    let mut last_sample_written: i16 = 0;
     // Open first FAT volume and stream WAV files back-to-back
     let raw_vol = match volume_mgr.open_raw_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
@@ -50,6 +55,20 @@ async fn sd_stream_task(
             let _ = names.push(de.name.clone());
         }
     });
+    // Print WAV filenames discovered in root (8.3 format)
+    for n in names.iter() {
+        let base = n.base_name();
+        let ext = n.extension();
+        let base_end = base.iter().rposition(|&b| b != b' ').map(|i| i + 1).unwrap_or(0);
+        let ext_end = ext.iter().rposition(|&b| b != b' ').map(|i| i + 1).unwrap_or(0);
+        let base_str = core::str::from_utf8(&base[..base_end]).unwrap_or("?");
+        if ext_end > 0 {
+            let ext_str = core::str::from_utf8(&ext[..ext_end]).unwrap_or("");
+            info!("WAV: {}.{}", base_str, ext_str);
+        } else {
+            info!("WAV: {}", base_str);
+        }
+    }
 
     // Helper: parse minimal WAV header
     fn parse_wav_header(h: &[u8]) -> Option<(u32, u16, u16, usize)> {
@@ -126,8 +145,10 @@ async fn sd_stream_task(
                         let _ = stereo.push(s);
                         let _ = stereo.push(s);
                     }
+                    last_sample_written = *stereo.last().unwrap_or(&0) as i16;
                     let _ = sai_tx.write(&stereo).await;
                 } else {
+                    last_sample_written = *out_samples.last().unwrap_or(&0) as i16;
                     let _ = sai_tx.write(&out_samples).await;
                 }
             } else {
@@ -139,10 +160,18 @@ async fn sd_stream_task(
                         let _ = stereo.push(s);
                         let _ = stereo.push(s);
                     }
+                    last_sample_written = *stereo.last().unwrap_or(&0) as i16;
                     let _ = sai_tx.write(&stereo).await;
                 } else {
+                    last_sample_written = *in_samples.last().unwrap_or(&0) as i16;
                     let _ = sai_tx.write(&in_samples).await;
                 }
+            }
+
+            // Log approximately once per second
+            if embassy_time::Instant::now() >= next_log {
+                info!("last sample written {}", last_sample_written);
+                next_log += embassy_time::Duration::from_secs(1);
             }
         }
         let _ = volume_mgr.close_file(raw_file);
@@ -163,31 +192,27 @@ async fn sai_test_tone_task(
     mut sai_tx: Sai<'static, peripherals::SAI1, u16>,
     mut led: Output<'static>,
 ) {
-    info!("Starting 1 kHz test tone");
-    // Precompute a continuous square wave buffer to avoid gaps between transfers.
+    info!("Starting 1 kHz sine tone");
+    // Precompute a continuous sine wave buffer to avoid gaps between transfers.
     const SAMPLE_RATE: u32 = 48_000;
-    const TONE_FREQ: u32 = 1_000;
-    const HALF_PERIOD_SAMPLES: usize = (SAMPLE_RATE / (2 * TONE_FREQ)) as usize; // 24 samples
+    const TONE_FREQ: f32 = 1000.0;
+    const TWO_PI: f32 = core::f32::consts::PI * 2.0;
     const STEREO_SAMPLES: usize = 4096; // u16 stereo samples in buffer (must be even)
 
     static STEREO_BUF: StaticCell<[u16; STEREO_SAMPLES]> = StaticCell::new();
     let buf = STEREO_BUF.init([0u16; STEREO_SAMPLES]);
 
-    let amplitude: i16 = 20000;
-    let pos: u16 = (amplitude as i16) as u16;
-    let neg: u16 = (-amplitude as i16) as u16;
-
-    // Fill buffer with stereo square wave (1 kHz)
-    let mut sample_idx: usize = 0; // mono sample index within half-period
-    let mut current: u16 = pos;
+    let amplitude: f32 = 0.9 * (i16::MAX as f32);
+    let incr: f32 = TWO_PI * (TONE_FREQ / SAMPLE_RATE as f32);
+    let mut phase: f32 = 0.0;
     for i in (0..STEREO_SAMPLES).step_by(2) {
-        buf[i] = current;     // Left
-        buf[i + 1] = current; // Right
-        sample_idx += 1;
-        if sample_idx >= HALF_PERIOD_SAMPLES {
-            sample_idx = 0;
-            current = if current == pos { neg } else { pos };
-        }
+        let s = sinf(phase) * amplitude;
+        let s16: i16 = s as i16;
+        let u: u16 = s16 as u16;
+        buf[i] = u;     // Left
+        buf[i + 1] = u; // Right
+        phase += incr;
+        if phase >= TWO_PI { phase -= TWO_PI; }
     }
 
     let mut writes_since_toggle: u32 = 0;
@@ -268,6 +293,11 @@ async fn main(spawner: Spawner) {
     sai_cfg.stereo_mono = sai::StereoMono::Stereo;
     sai_cfg.data_size = sai::DataSize::Data16;
     sai_cfg.bit_order = sai::BitOrder::MsbFirst;
+    // Explicit slots: 2x32-bit with both L+R enabled
+    sai_cfg.slot_size = sai::SlotSize::Channel32;
+    sai_cfg.slot_count = sai::word::U4(2);
+    sai_cfg.slot_enable = 0b11;
+    sai_cfg.first_bit_offset = sai::word::U5(0);
     // Configure framing
     if USE_LEFT_JUSTIFIED {
         // Left-Justified: WS high = left, data MSB on WS edge
@@ -285,12 +315,14 @@ async fn main(spawner: Spawner) {
     let sai_tx = Sai::new_asynchronous(
         sai_a,
         p.PA7,   // SCK  (BCLK)
-        p.PB12,  // SD   (data)
+        p.PB14,  // SD   (data)
         p.PA8,   // FS   (LRC / WS)
         p.GPDMA1_CH0,
         sai_dma_buf,
         sai_cfg,
     );
+
+    // (PWM removed)
 
     // Set up SPI for microSD (SPI1: SCK=PB4, MISO=PB3, MOSI=PA15; CS=PA6). Adjust to your board wiring.
     let mut spi_cfg = spi::Config::default();
@@ -318,7 +350,7 @@ async fn main(spawner: Spawner) {
 
     // Bump SPI after init
     let mut spi_cfg2 = spi::Config::default();
-    spi_cfg2.frequency = Hertz(16_000_000);
+    spi_cfg2.frequency = Hertz(8_000_000);
     let _ = sd.spi(|dev| dev.bus_mut().set_config(&spi_cfg2));
 
     static VOLUME_MANAGER: StaticCell<VolumeManager<SdCardDev, DummyTimesource>> = StaticCell::new();
