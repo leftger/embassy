@@ -649,10 +649,10 @@ fn init_hw(config: Config) -> Peripherals {
             rcc::init_rcc(cs, config.rcc);
 
             #[cfg(feature = "low-power")]
-            crate::rtc::init_rtc(cs, config.rtc);
+            rtc::init_rtc(cs, config.rtc, config.min_stop_pause);
 
-            #[cfg(feature = "low-power")]
-            crate::time_driver::get_driver().set_min_stop_pause(cs, config.min_stop_pause);
+            #[cfg(all(stm32wb, feature = "low-power"))]
+            hsem::init_hsem(cs);
         }
 
         p

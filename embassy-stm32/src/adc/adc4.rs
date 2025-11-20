@@ -77,7 +77,7 @@ pub const fn resolution_to_max_count(res: Resolution) -> u32 {
 }
 
 fn from_ker_ck(frequency: Hertz) -> Presc {
-    let raw_prescaler = frequency.0 / MAX_ADC_CLK_FREQ.0;
+    let raw_prescaler = rcc::raw_prescaler(frequency.0, MAX_ADC_CLK_FREQ.0);
     match raw_prescaler {
         0 => Presc::DIV1,
         1 => Presc::DIV2,
@@ -113,10 +113,26 @@ foreach_adc!(
             }
 
             fn enable() {
+                let cr_initial = ADC4::regs().cr().read();
+                let isr_initial = ADC4::regs().isr().read();
+
+                if cr_initial.aden() && isr_initial.adrdy() {
+                    return;
+                }
+
+                if cr_initial.aden() || cr_initial.adstart() {
+                    if cr_initial.adstart() {
+                        ADC4::regs().cr().modify(|w| w.set_adstp(true));
+                        while ADC4::regs().cr().read().adstart() {}
+                    }
+
+                    ADC4::regs().cr().modify(|w| w.set_addis(true));
+                    while ADC4::regs().cr().read().aden() {}
+                }
+
                 ADC4::regs().isr().write(|w| w.set_adrdy(true));
                 ADC4::regs().cr().modify(|w| w.set_aden(true));
                 while !ADC4::regs().isr().read().adrdy() {}
-                ADC4::regs().isr().write(|w| w.set_adrdy(true));
             }
 
             fn start() {

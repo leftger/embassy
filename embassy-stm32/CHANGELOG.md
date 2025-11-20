@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased - ReleaseDate
 
+- fix: Fixed ADC4 enable() for WBA
+- feat: allow use of anyadcchannel for adc4
+- fix: fix incorrect logic for buffered usart transmission complete.
+- feat: add poll_for methods to exti
+- feat: implement stop for stm32wb.
+- change: rework hsem and add HIL test for some chips.
+- change: stm32/eth: ethernet no longer has a hard dependency on station management, and station management can be used independently ([#4871](https://github.com/embassy-rs/embassy/pull/4871))
+- feat: allow embassy_executor::main for low power
+- feat: Add waveform methods to ComplementaryPwm
+- fix: Avoid generating timer update events when updating the frequency ([#4890](https://github.com/embassy-rs/embassy/pull/4890))
+- chore: cleanup low-power add time
+- fix: Allow setting SAI peripheral `frame_length` to `256`
 - fix: flash erase on dual-bank STM32Gxxx
 - feat: Add support for STM32N657X0
 - feat: timer: Add 32-bit timer support to SimplePwm waveform_up method following waveform pattern ([#4717](https://github.com/embassy-rs/embassy/pull/4717))
@@ -38,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - feat: stm32/usart: add `eager_reads` option to control if buffered readers return as soon as possible or after more data is available ([#4668](https://github.com/embassy-rs/embassy/pull/4668))
 - feat: stm32/usart: add `de_assertion_time` and `de_deassertion_time` config options
 - change: stm32/uart: BufferedUartRx now returns all available bytes from the internal buffer
+- fix: stm32/adc: Calculate the ADC prescaler in a way that it allows for the max frequency to be reached
 - fix: Prevent a HardFault crash on STM32H5 devices by changing `uid()` to return `[u8; 12]` by value instead of a reference. (Fixes #2696)
 - change: timer: added output compare values
 - feat: timer: add ability to set master mode
@@ -58,6 +71,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - adc: reogranize and cleanup somewhat. require sample_time to be passed on conversion
 - fix: stm32/i2c v2 slave: prevent misaligned reads, error false positives, and incorrect counts of bytes read/written
 - feat: add flash support for c0 family ([#4874](https://github.com/embassy-rs/embassy/pull/4874))
+- fix: fixing channel numbers on vbat and vddcore for adc on adc
+- adc: adding disable to vbat
+- feat: stm32/flash: add async support for h7 family
 
 ## 0.4.0 - 2025-08-26
 
