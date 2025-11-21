@@ -1,22 +1,26 @@
 #![no_std]
 #![no_main]
 
+use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::sai::{self, Sai};
+use embassy_stm32::spi::{self, Spi};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::{peripherals, Config};
+use embassy_stm32::{Config, peripherals};
 use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
 use embedded_sdmmc::filesystem::ShortFileName;
 use embedded_sdmmc::{SdCard, VolumeManager};
 use static_cell::StaticCell;
-use defmt::*;
-use embassy_stm32::spi::{self, Spi};
 use {defmt_rtt as _, panic_probe as _};
 
 // This example plays WAV files from microSD to SAI.
 
-type SdSpiDev = ExclusiveDevice<Spi<'static, embassy_stm32::mode::Async>, Output<'static>, NoDelay>;
+type SdSpiDev = ExclusiveDevice<
+    Spi<'static, embassy_stm32::mode::Async, embassy_stm32::spi::mode::Master>,
+    Output<'static>,
+    NoDelay,
+>;
 type SdCardDev = SdCard<SdSpiDev, embassy_time::Delay>;
 
 const USE_LEFT_JUSTIFIED: bool = false; // Set true to try Left-Justified framing
@@ -69,8 +73,12 @@ async fn sd_stream_task(
 
     // Helper: parse minimal (robust) WAV header: returns (sample_rate, channels, bits, data_offset)
     fn parse_wav_header(h: &[u8]) -> Option<(u32, u16, u16, usize)> {
-        if h.len() < 44 { return None; }
-        if &h[0..4] != b"RIFF" || &h[8..12] != b"WAVE" { return None; }
+        if h.len() < 44 {
+            return None;
+        }
+        if &h[0..4] != b"RIFF" || &h[8..12] != b"WAVE" {
+            return None;
+        }
         let mut idx = 12;
         let mut fmt_found = false;
         let mut data_off = None;
@@ -78,17 +86,23 @@ async fn sd_stream_task(
         let mut channels = 0u16;
         let mut bits = 0u16;
         while idx + 8 <= h.len() {
-            let id = &h[idx..idx+4];
-            let sz = u32::from_le_bytes([h[idx+4],h[idx+5],h[idx+6],h[idx+7]]) as usize;
+            let id = &h[idx..idx + 4];
+            let sz = u32::from_le_bytes([h[idx + 4], h[idx + 5], h[idx + 6], h[idx + 7]]) as usize;
             idx += 8;
-            if idx + sz > h.len() { break; }
+            if idx + sz > h.len() {
+                break;
+            }
             if id == b"fmt " {
-                if sz < 16 { return None; }
-                let audio_fmt = u16::from_le_bytes([h[idx],h[idx+1]]);
-                channels = u16::from_le_bytes([h[idx+2],h[idx+3]]);
-                sample_rate = u32::from_le_bytes([h[idx+4],h[idx+5],h[idx+6],h[idx+7]]);
-                bits = u16::from_le_bytes([h[idx+14],h[idx+15]]);
-                if audio_fmt != 1 { return None; }
+                if sz < 16 {
+                    return None;
+                }
+                let audio_fmt = u16::from_le_bytes([h[idx], h[idx + 1]]);
+                channels = u16::from_le_bytes([h[idx + 2], h[idx + 3]]);
+                sample_rate = u32::from_le_bytes([h[idx + 4], h[idx + 5], h[idx + 6], h[idx + 7]]);
+                bits = u16::from_le_bytes([h[idx + 14], h[idx + 15]]);
+                if audio_fmt != 1 {
+                    return None;
+                }
                 fmt_found = true;
             } else if id == b"data" {
                 data_off = Some(idx);
@@ -96,7 +110,9 @@ async fn sd_stream_task(
             }
             idx += sz;
         }
-        if !fmt_found { return None; }
+        if !fmt_found {
+            return None;
+        }
         let doff = data_off?;
         Some((sample_rate, channels, bits, doff))
     }
@@ -107,15 +123,17 @@ async fn sd_stream_task(
         let frames_in = in_samples.len() / channels;
         let frames_out = (frames_in as u32 * 160 / 147) as usize;
         out_buf.clear();
-        if frames_in < 2 { return; }
+        if frames_in < 2 {
+            return;
+        }
         for fo in 0..frames_out {
             let pos_num = fo as u32 * 147;
             let i0 = (pos_num / 160) as usize;
             let frac_num = (pos_num % 160) as u32; // 0..159
             let i1 = (i0 + 1).min(frames_in - 1);
             for ch in 0..channels {
-                let s0 = in_samples[i0*channels + ch] as i32;
-                let s1 = in_samples[i1*channels + ch] as i32;
+                let s0 = in_samples[i0 * channels + ch] as i32;
+                let s1 = in_samples[i1 * channels + ch] as i32;
                 let interp = s0 * (160 - frac_num) as i32 + s1 * frac_num as i32;
                 let val = (interp / 160) as i32;
                 let _ = out_buf.push(val.clamp(0, 0xFFFF) as u16);
@@ -130,10 +148,27 @@ async fn sd_stream_task(
             Ok(f) => f,
             Err(_) => continue,
         };
-        if volume_mgr.read(raw_file, &mut hdr).unwrap_or(0) < 44 { let _ = volume_mgr.close_file(raw_file); continue; }
-        let (sr, ch, bits, data_off) = match parse_wav_header(&hdr) { Some(v) => v, None => { let _=volume_mgr.close_file(raw_file); continue } };
-        if bits != 16 { warn!("Skip non-16b"); let _=volume_mgr.close_file(raw_file); continue; }
-        if sr != 44_100 && sr != 48_000 { warn!("Skip sr {}", sr); let _=volume_mgr.close_file(raw_file); continue; }
+        if volume_mgr.read(raw_file, &mut hdr).unwrap_or(0) < 44 {
+            let _ = volume_mgr.close_file(raw_file);
+            continue;
+        }
+        let (sr, ch, bits, data_off) = match parse_wav_header(&hdr) {
+            Some(v) => v,
+            None => {
+                let _ = volume_mgr.close_file(raw_file);
+                continue;
+            }
+        };
+        if bits != 16 {
+            warn!("Skip non-16b");
+            let _ = volume_mgr.close_file(raw_file);
+            continue;
+        }
+        if sr != 44_100 && sr != 48_000 {
+            warn!("Skip sr {}", sr);
+            let _ = volume_mgr.close_file(raw_file);
+            continue;
+        }
         let channels = ch as usize;
 
         // Seek to data offset if header larger than buffer's first read
@@ -153,12 +188,17 @@ async fn sd_stream_task(
         let mut out_samples: heapless::Vec<u16, 1024> = heapless::Vec::new();
 
         loop {
-            let n = match volume_mgr.read(raw_file, &mut file_buf) { Ok(n) => n, Err(_) => 0 };
-            if n == 0 { break; }
+            let n = match volume_mgr.read(raw_file, &mut file_buf) {
+                Ok(n) => n,
+                Err(_) => 0,
+            };
+            if n == 0 {
+                break;
+            }
             in_samples.clear();
             let mut i = 0;
             while i + 1 < n && in_samples.len() < in_samples.capacity() {
-                let s = u16::from_le_bytes([file_buf[i], file_buf[i+1]]);
+                let s = u16::from_le_bytes([file_buf[i], file_buf[i + 1]]);
                 let _ = in_samples.push(s);
                 i += 2;
             }
@@ -169,7 +209,9 @@ async fn sd_stream_task(
                     // Duplicate mono to stereo
                     let mut stereo: heapless::Vec<u16, 1024> = heapless::Vec::new();
                     for &s in out_samples.iter() {
-                        if stereo.len() + 2 > stereo.capacity() { break; }
+                        if stereo.len() + 2 > stereo.capacity() {
+                            break;
+                        }
                         let _ = stereo.push(s);
                         let _ = stereo.push(s);
                     }
@@ -190,7 +232,9 @@ async fn sd_stream_task(
                     // Duplicate mono to stereo
                     let mut stereo: heapless::Vec<u16, 1024> = heapless::Vec::new();
                     for &s in in_samples.iter() {
-                        if stereo.len() + 2 > stereo.capacity() { break; }
+                        if stereo.len() + 2 > stereo.capacity() {
+                            break;
+                        }
                         let _ = stereo.push(s);
                         let _ = stereo.push(s);
                     }
@@ -221,10 +265,16 @@ async fn sd_stream_task(
 struct DummyTimesource();
 impl embedded_sdmmc::TimeSource for DummyTimesource {
     fn get_timestamp(&self) -> embedded_sdmmc::Timestamp {
-        embedded_sdmmc::Timestamp { year_since_1970: 0, zero_indexed_month: 0, zero_indexed_day: 0, hours: 0, minutes: 0, seconds: 0 }
+        embedded_sdmmc::Timestamp {
+            year_since_1970: 0,
+            zero_indexed_month: 0,
+            zero_indexed_day: 0,
+            hours: 0,
+            minutes: 0,
+            seconds: 0,
+        }
     }
 }
-
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -234,16 +284,16 @@ async fn main(spawner: Spawner) {
     {
         use embassy_stm32::rcc::*;
         config.rcc.pll1 = Some(Pll {
-            source: PllSource::HSI,          // 16 MHz
-            prediv: PllPreDiv::DIV1,         // M
-            mul: PllMul::MUL12,              // Integer N (12)
+            source: PllSource::HSI,  // 16 MHz
+            prediv: PllPreDiv::DIV1, // M
+            mul: PllMul::MUL12,      // Integer N (12)
             // Fraction gives: 16 * (12 + 2363/8192) ≈ 196.608 MHz VCO
-            divq: Some(PllDiv::DIV4),        // 196.608 / 4 = 49.152 MHz -> SAI kernel
-            divr: Some(PllDiv::DIV5),        // System clock path (adjust if you need a higher HCLK)
+            divq: Some(PllDiv::DIV4), // 196.608 / 4 = 49.152 MHz -> SAI kernel
+            divr: Some(PllDiv::DIV5), // System clock path (adjust if you need a higher HCLK)
             divp: Some(PllDiv::DIV30),
             frac: Some(2363),
         });
-        
+
         config.rcc.ahb_pre = AHBPrescaler::DIV1;
         config.rcc.apb1_pre = APBPrescaler::DIV1;
         config.rcc.apb2_pre = APBPrescaler::DIV1;
@@ -295,9 +345,9 @@ async fn main(spawner: Spawner) {
 
     let sai_tx = Sai::new_asynchronous(
         sai_a,
-        p.PA7,   // SCK  (BCLK)
-        p.PB14,  // SD   (data)
-        p.PA8,   // FS   (LRC / WS)
+        p.PA7,  // SCK  (BCLK)
+        p.PB14, // SD   (data)
+        p.PA8,  // FS   (LRC / WS)
         p.GPDMA1_CH0,
         sai_dma_buf,
         sai_cfg,
@@ -338,7 +388,5 @@ async fn main(spawner: Spawner) {
     let vol_mgr: &'static mut VolumeManager<SdCardDev, DummyTimesource> =
         VOLUME_MANAGER.init(VolumeManager::new(sd, DummyTimesource()));
 
-
     spawner.spawn(unwrap!(sd_stream_task(sai_tx, vol_mgr)));
-
 }
