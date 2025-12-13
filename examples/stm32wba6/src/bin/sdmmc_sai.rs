@@ -299,7 +299,7 @@ async fn main(spawner: Spawner) {
         config.rcc.apb1_pre = APBPrescaler::DIV1;
         config.rcc.apb2_pre = APBPrescaler::DIV1;
         config.rcc.apb7_pre = APBPrescaler::DIV1;
-        config.rcc.ahb5_pre = AHB5Prescaler::DIV4;
+        config.rcc.ahb5_pre = AHB5Prescaler::DIV2;
 
         config.rcc.voltage_scale = VoltageScale::RANGE1;
 
