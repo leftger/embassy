@@ -3,8 +3,9 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::gpio::{Level, Output, Speed, Input, Pull};
 use embassy_stm32::sai::{self, Sai};
+use embassy_sync::channel::{Channel, Receiver};
 use embassy_stm32::spi::{self, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::{Config, peripherals};
@@ -19,12 +20,37 @@ use {defmt_rtt as _, panic_probe as _};
 // Volume scaling factor (0.0 = silent, 1.0 = full volume)
 const VOLUME_SCALE: f32 = 0.5; // 37.5% volume (30% + 25% increase)
 
+// Simple random number generator (LCG)
+struct SimpleRng {
+    state: u32,
+}
+
+impl SimpleRng {
+    fn new(seed: u32) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        // LCG parameters: a=1664525, c=1013904223, m=2^32
+        self.state = self.state.wrapping_mul(1664525).wrapping_add(1013904223);
+        self.state
+    }
+
+    fn next_usize(&mut self, max: usize) -> usize {
+        (self.next_u32() as usize) % max
+    }
+}
+
 type SdSpiDev = ExclusiveDevice<
     Spi<'static, embassy_stm32::mode::Async, embassy_stm32::spi::mode::Master>,
     Output<'static>,
     NoDelay,
 >;
 type SdCardDev = SdCard<SdSpiDev, embassy_time::Delay>;
+
+// Channel for button press communication
+static BUTTON_CHANNEL: Channel<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, (), 1> = Channel::new();
+
 
 const USE_LEFT_JUSTIFIED: bool = false; // Back to I2S - sounded better before
 const USE_EMBEDDED_WAV: bool = false; // Back to SD card, but debug the issue
@@ -131,9 +157,45 @@ async fn play_embedded_wav(mut sai_tx: Sai<'static, peripherals::SAI1, u16>) {
 }
 
 #[embassy_executor::task]
+async fn button_task(button: Input<'static>) {
+    info!("Button task started - PC13 (B1) for skip to next song");
+
+    loop {
+        // Poll for button press (active low)
+        let is_low = button.is_low();
+        if is_low {
+            info!("PC13 detected LOW - button press detected");
+            // Debounce delay
+            embassy_time::Timer::after_millis(50).await;
+
+            // Check if still pressed after debounce
+            if button.is_low() {
+                info!("PC13 button pressed - skipping to next song");
+                // Send signal to playback task
+                BUTTON_CHANNEL.sender().send(()).await;
+                info!("Button signal sent to playback task");
+
+                // Wait for button release to avoid repeated triggers
+                while button.is_low() {
+                    embassy_time::Timer::after_millis(10).await;
+                }
+
+                // Additional debounce after release
+                embassy_time::Timer::after_millis(50).await;
+                info!("PC13 button released");
+            }
+        }
+
+        // Small delay between polls to avoid busy waiting
+        embassy_time::Timer::after_millis(10).await;
+    }
+}
+
+#[embassy_executor::task]
 async fn sd_stream_task(
     mut sai_tx: Sai<'static, peripherals::SAI1, u16>,
     volume_mgr: &'static mut VolumeManager<SdCardDev, DummyTimesource>,
+    button_rx: Receiver<'static, embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, (), 1>,
 ) {
     info!("SD stream task started");
     // Periodic log of last sample sent to SAI
@@ -300,9 +362,43 @@ async fn sd_stream_task(
         }
     }
 
-    // Play each WAV file in order
-    for name in names.iter() {
-        info!("Trying to open file: {:?}", defmt::Debug2Format(name));
+    // Initialize random number generator with current time as seed
+    let mut rng = SimpleRng::new(embassy_time::Instant::now().as_ticks() as u32);
+
+    // Start with a random song at bootup
+    let mut current_index = if !names.is_empty() {
+        let random_start = rng.next_usize(names.len());
+        info!("Bootup - starting with random song index: {}", random_start);
+        random_start
+    } else {
+        0
+    };
+
+    // Play WAV files in totally random order
+    loop {
+        // Check for button press (non-blocking) - skip to next random song
+        match button_rx.try_receive() {
+            Ok(_) => {
+                info!("Button signal received in playback task");
+                // Button pressed - select another random song
+                if !names.is_empty() {
+                    current_index = rng.next_usize(names.len());
+                    info!("Button pressed - skipped to random song index: {}", current_index);
+                }
+            }
+            Err(_) => {
+                // No button press, continue normally
+            }
+        }
+
+        // Get current file name
+        if names.is_empty() {
+            info!("No audio files found");
+            break;
+        }
+
+        let name = &names[current_index];
+        info!("Playing file index {}: {:?}", current_index, defmt::Debug2Format(name));
         let mut hdr = [0u8; 2048]; // allow bigger header for extra chunks
         let raw_file = match volume_mgr.open_file_in_dir(raw_root, name.clone(), embedded_sdmmc::Mode::ReadOnly) {
             Ok(f) => {
@@ -333,10 +429,26 @@ async fn sd_stream_task(
 
             let mut file_buf = [0u8; 512];
             let mut total_samples_read = 0u32;
-            let mut current_file_offset = 0u32;
+            let mut _current_file_offset = 0u32;
 
             // Direct streaming loop - no processing needed!
             loop {
+                // Check for button press during PCM playback
+                match button_rx.try_receive() {
+                    Ok(_) => {
+                        info!("Button pressed during PCM playback - skipping to next song");
+                        // Button pressed - select another random song and break out
+                        if !names.is_empty() {
+                            current_index = rng.next_usize(names.len());
+                            info!("PCM interrupted - selected random song index: {}", current_index);
+                        }
+                        break; // Exit PCM processing loop to switch songs
+                    }
+                    Err(_) => {
+                        // No button press, continue playing
+                    }
+                }
+
                 let n = match volume_mgr.read(raw_file, &mut file_buf) {
                     Ok(n) => n,
                     Err(e) => {
@@ -348,7 +460,7 @@ async fn sd_stream_task(
                     info!("End of PCM file reached, total samples: {}", total_samples_read);
                     break;
                 }
-                current_file_offset += n as u32;
+                _current_file_offset += n as u32;
                 total_samples_read += (n / 2) as u32; // 2 bytes per sample
 
                 // Convert raw bytes to u16 samples with volume scaling
@@ -373,45 +485,52 @@ async fn sd_stream_task(
             }
 
             let _ = volume_mgr.close_file(raw_file);
+            // After PCM file, select another random song
+            if !names.is_empty() {
+                current_index = rng.next_usize(names.len());
+                info!("PCM finished - selected random song index: {}", current_index);
+            }
             continue; // Process next file
-        } else {
-            info!("Read {} header bytes", header_bytes);
+        }
+
+        // Handle WAV files (default case)
+        info!("Read {} header bytes", header_bytes);
             if header_bytes < 44 {
                 warn!("Header too short: {} bytes", header_bytes);
                 let _ = volume_mgr.close_file(raw_file);
                 continue;
             }
             let wav_info = match parse_wav_header(&hdr) {
-            Some((sr, ch, bits, data_off)) => {
-                info!("Parsed WAV: {}Hz, {}ch, {}bit, data_offset={}", sr, ch, bits, data_off);
-                (sr, ch, bits, data_off)
-            }
-            None => {
-                warn!("Failed to parse WAV header");
-                // Debug: show first 16 bytes of header
-                info!(
-                    "Header bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                    hdr[0],
-                    hdr[1],
-                    hdr[2],
-                    hdr[3],
-                    hdr[4],
-                    hdr[5],
-                    hdr[6],
-                    hdr[7],
-                    hdr[8],
-                    hdr[9],
-                    hdr[10],
-                    hdr[11],
-                    hdr[12],
-                    hdr[13],
-                    hdr[14],
-                    hdr[15]
-                );
-                let _ = volume_mgr.close_file(raw_file);
-                continue;
-            }
-        };
+                Some((sr, ch, bits, data_off)) => {
+                    info!("Parsed WAV: {}Hz, {}ch, {}bit, data_offset={}", sr, ch, bits, data_off);
+                    (sr, ch, bits, data_off)
+                }
+                None => {
+                    warn!("Failed to parse WAV header");
+                    // Debug: show first 16 bytes of header
+                    info!(
+                        "Header bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                        hdr[0],
+                        hdr[1],
+                        hdr[2],
+                        hdr[3],
+                        hdr[4],
+                        hdr[5],
+                        hdr[6],
+                        hdr[7],
+                        hdr[8],
+                        hdr[9],
+                        hdr[10],
+                        hdr[11],
+                        hdr[12],
+                        hdr[13],
+                        hdr[14],
+                        hdr[15]
+                    );
+                    let _ = volume_mgr.close_file(raw_file);
+                    continue;
+                }
+            };
         let (sr, ch, bits, data_off) = wav_info;
         if bits != 16 {
             warn!("Skip non-16bit file ({} bits)", bits);
@@ -479,6 +598,22 @@ async fn sd_stream_task(
         }
 
         loop {
+            // Check for button press during WAV playback
+            match button_rx.try_receive() {
+                Ok(_) => {
+                    info!("Button pressed during WAV playback - skipping to next song");
+                    // Button pressed - select another random song and break out
+                    if !names.is_empty() {
+                        current_index = rng.next_usize(names.len());
+                        info!("WAV interrupted - selected random song index: {}", current_index);
+                    }
+                    break; // Exit WAV processing loop to switch songs
+                }
+                Err(_) => {
+                    // No button press, continue playing
+                }
+            }
+
             let n = match volume_mgr.read(raw_file, &mut file_buf) {
                 Ok(n) => n,
                 Err(e) => {
@@ -532,10 +667,15 @@ async fn sd_stream_task(
             }
         }
         let _ = volume_mgr.close_file(raw_file);
+
+        // After WAV file finishes, select another random song
+        if !names.is_empty() {
+            current_index = rng.next_usize(names.len());
+            info!("WAV finished - selected random song index: {}", current_index);
         }
     }
 
-    // If no valid WAV files found, generate a test tone
+    // If we get here, no valid WAV files found, generate a test tone
     info!("No valid WAV files found, generating test tone");
     // Generate a 1kHz sine wave at 48kHz sample rate
     let sample_rate = 48000;
@@ -556,6 +696,22 @@ async fn sd_stream_task(
 
     // Generate continuous 1kHz sine wave
     loop {
+        // Check for button press during sine wave playback
+        match button_rx.try_receive() {
+            Ok(_) => {
+                info!("Button pressed during sine wave playback - skipping to next song");
+                // Button pressed - select another random song and break out
+                if !names.is_empty() {
+                    current_index = rng.next_usize(names.len());
+                    info!("Sine wave interrupted - selected random song index: {}", current_index);
+                }
+                break; // Exit sine wave loop to switch songs
+            }
+            Err(_) => {
+                // No button press, continue playing
+            }
+        }
+
         samples.clear();
 
         // Generate 128 samples (about 2.7ms at 48kHz) of sine wave
@@ -703,6 +859,10 @@ async fn main(spawner: Spawner) {
     let _max98357a_sd = Output::new(p.PA1, Level::High, Speed::Low);
     info!("MAX98357A SD pin (PA1) set to HIGH - I2S mode enabled");
 
+    // Configure PC13 as input with pull-up for button (active low) - B1 on Nucleo board
+    let button = Input::new(p.PC13, Pull::Up);
+    info!("PC13 button configured with pull-up (press to skip to next random song) - B1 on Nucleo board");
+
     // SAI transmitters start automatically when writing, no need to call start()
 
     // (PWM removed)
@@ -740,5 +900,6 @@ async fn main(spawner: Spawner) {
     let vol_mgr: &'static mut VolumeManager<SdCardDev, DummyTimesource> =
         VOLUME_MANAGER.init(VolumeManager::new(sd, DummyTimesource()));
 
-    spawner.spawn(unwrap!(sd_stream_task(sai_tx, vol_mgr)));
+    spawner.spawn(unwrap!(button_task(button)));
+    spawner.spawn(unwrap!(sd_stream_task(sai_tx, vol_mgr, BUTTON_CHANNEL.receiver())));
 }

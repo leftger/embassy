@@ -91,6 +91,8 @@ SD Card → Direct Read → SAI DMA
 - **Performance gain**: **~15x faster!**
 - **Volume control**: Software scaling (minimal overhead)
 - **Current volume**: 37.5% (configurable)
+- **🎲 Random Playback**: Starts random, continues randomly
+- **⏭️ Skip Button**: PC13 (B1) button to skip to next random song
 
 ## 🔧 Advanced Usage
 
@@ -109,6 +111,28 @@ for file in *.wav; do
     ./convert_wav.sh "$file" "${file%.wav}.pcm"
 done
 ```
+
+## 🎲 Random Playback Mode
+
+The player now features **completely random playlist behavior**:
+
+### **🎵 Playback Behavior**
+- **Bootup**: Starts with a random song from your SD card
+- **Sequential**: After each song ends, selects another random song
+- **Button Control**: Press PC5 to instantly jump to any random song
+- **No repeats**: Each selection is independent and random
+
+### **🎮 Hardware Controls**
+- **PC13 (B1) Button**: Connected to PC13 pin with pull-up resistor (B1 on Nucleo board)
+- **Active Low**: Press button to GND to skip to next random song
+- **Debounced**: 50ms debounce prevents accidental triggers
+- **Real-time**: Button works during any playback (PCM, WAV, or sine wave)
+
+### **🔧 Technical Implementation**
+- **Random Seed**: Uses system time for true randomness
+- **LCG Algorithm**: Linear Congruential Generator for fast random numbers
+- **Non-blocking**: Button detection doesn't interrupt playback
+- **Channel Communication**: Embassy channels for inter-task messaging
 
 ## 🎉 Zero-Overhead Audio Streaming!
 
