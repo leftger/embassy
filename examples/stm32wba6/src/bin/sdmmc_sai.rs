@@ -86,31 +86,53 @@ async fn sd_stream_task(
         let mut sample_rate = 0u32;
         let mut channels = 0u16;
         let mut bits = 0u16;
+        let mut chunk_count = 0;
         while idx + 8 <= h.len() {
             let id = &h[idx..idx + 4];
             let sz = u32::from_le_bytes([h[idx + 4], h[idx + 5], h[idx + 6], h[idx + 7]]) as usize;
+            chunk_count += 1;
+            let chunk_name = core::str::from_utf8(id).unwrap_or("????");
+            info!("Chunk {}: {} at idx={}, size={}", chunk_count, chunk_name, idx, sz);
             idx += 8;
             if idx + sz > h.len() {
-                break;
+                if id == b"data" {
+                    info!("Found data chunk but size {} exceeds buffer - data starts at file offset {}", sz, idx);
+                    // For data chunks that are too big, we can still use the offset
+                    data_off = Some(idx);
+                    break;
+                } else {
+                    info!("Chunk {}: {} size {} exceeds buffer (idx={}, sz={}, h.len={}) - stopping parse",
+                          chunk_count, chunk_name, sz, idx, sz, h.len());
+                    break;
+                }
             }
             if id == b"fmt " {
+                info!("Found fmt chunk, size: {}", sz);
                 if sz < 16 {
+                    info!("fmt chunk too small: {}", sz);
                     return None;
                 }
                 let audio_fmt = u16::from_le_bytes([h[idx], h[idx + 1]]);
                 channels = u16::from_le_bytes([h[idx + 2], h[idx + 3]]);
                 sample_rate = u32::from_le_bytes([h[idx + 4], h[idx + 5], h[idx + 6], h[idx + 7]]);
                 bits = u16::from_le_bytes([h[idx + 14], h[idx + 15]]);
+                info!("fmt: format={}, channels={}, rate={}, bits={}", audio_fmt, channels, sample_rate, bits);
                 if audio_fmt != 1 {
+                    info!("Unsupported audio format: {}", audio_fmt);
                     return None;
                 }
                 fmt_found = true;
             } else if id == b"data" {
+                info!("Found data chunk at offset {}, size: {}", idx, sz);
                 data_off = Some(idx);
                 break;
+            } else {
+                let chunk_name = core::str::from_utf8(id).unwrap_or("????");
+                info!("Skipping unknown chunk: {} (size: {})", chunk_name, sz);
             }
             idx += sz;
         }
+        info!("Parsed {} chunks, fmt_found: {}, data_off: {:?}", chunk_count, fmt_found, data_off);
         if !fmt_found {
             return None;
         }
@@ -133,74 +155,146 @@ async fn sd_stream_task(
             let frac_num = (pos_num % 160) as u32; // 0..159
             let i1 = (i0 + 1).min(frames_in - 1);
             for ch in 0..channels {
-                let s0 = in_samples[i0 * channels + ch] as i32;
-                let s1 = in_samples[i1 * channels + ch] as i32;
+                // Convert unsigned samples back to signed for interpolation
+                let s0 = (in_samples[i0 * channels + ch] as i32) - 0x8000;
+                let s1 = (in_samples[i1 * channels + ch] as i32) - 0x8000;
                 let interp = s0 * (160 - frac_num) as i32 + s1 * frac_num as i32;
                 let val = (interp / 160) as i32;
-                let _ = out_buf.push(val.clamp(0, 0xFFFF) as u16);
+                // Convert back to unsigned with offset
+                let unsigned_val = (val + 0x8000).clamp(0, 0xFFFF) as u16;
+                let _ = out_buf.push(unsigned_val);
             }
         }
     }
 
     // Play each WAV file in order
     for name in names.iter() {
-        let mut hdr = [0u8; 256]; // allow bigger header for extra chunks
+        info!("Trying to open file: {:?}", defmt::Debug2Format(name));
+        let mut hdr = [0u8; 2048]; // allow bigger header for extra chunks
         let raw_file = match volume_mgr.open_file_in_dir(raw_root, name.clone(), embedded_sdmmc::Mode::ReadOnly) {
-            Ok(f) => f,
-            Err(_) => continue,
+            Ok(f) => {
+                info!("Successfully opened file");
+                f
+            },
+            Err(e) => {
+                warn!("Failed to open file: {:?}", defmt::Debug2Format(&e));
+                continue;
+            }
         };
-        if volume_mgr.read(raw_file, &mut hdr).unwrap_or(0) < 44 {
-            let _ = volume_mgr.close_file(raw_file);
-            continue;
-        }
-        let (sr, ch, bits, data_off) = match parse_wav_header(&hdr) {
-            Some(v) => v,
-            None => {
+        let header_bytes = match volume_mgr.read(raw_file, &mut hdr) {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("Failed to read header: {:?}", defmt::Debug2Format(&e));
                 let _ = volume_mgr.close_file(raw_file);
                 continue;
             }
         };
+        info!("Read {} header bytes", header_bytes);
+        if header_bytes < 44 {
+            warn!("Header too short: {} bytes", header_bytes);
+            let _ = volume_mgr.close_file(raw_file);
+            continue;
+        }
+        let wav_info = match parse_wav_header(&hdr) {
+            Some((sr, ch, bits, data_off)) => {
+                info!("Parsed WAV: {}Hz, {}ch, {}bit, data_offset={}", sr, ch, bits, data_off);
+                (sr, ch, bits, data_off)
+            },
+            None => {
+                warn!("Failed to parse WAV header");
+                // Debug: show first 16 bytes of header
+                info!("Header bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                      hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7],
+                      hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15]);
+                let _ = volume_mgr.close_file(raw_file);
+                continue;
+            }
+        };
+        let (sr, ch, bits, data_off) = wav_info;
         if bits != 16 {
-            warn!("Skip non-16b");
+            warn!("Skip non-16bit file ({} bits)", bits);
             let _ = volume_mgr.close_file(raw_file);
             continue;
         }
         if sr != 44_100 && sr != 48_000 {
-            warn!("Skip sr {}", sr);
+            warn!("Skip unsupported sample rate: {} Hz (only 44100 or 48000 supported)", sr);
             let _ = volume_mgr.close_file(raw_file);
             continue;
         }
+        info!("File validation passed: {}Hz, {}ch, {}bit", sr, ch, bits);
+        info!("Starting playback of valid WAV file");
         let channels = ch as usize;
 
-        // Seek to data offset if header larger than buffer's first read
-        if data_off > hdr.len() {
-            // simplistic: unsupported very large header
-            let _ = volume_mgr.close_file(raw_file);
-            continue;
-        } else if data_off > 256 {
-            let _ = volume_mgr.close_file(raw_file);
-            continue;
+        // Check if we can start streaming from the data offset
+        if data_off <= hdr.len() {
+            // Data starts within our header buffer
+            info!("Data starts at offset {}, within header buffer", data_off);
         } else {
-            // If data_off > amount already consumed (e.g. >256) we'd need a seek API; not present here.
+            // Data starts beyond our header buffer - this is normal for large files
+            // We'll need to seek to the data offset when we start reading
+            info!("Data starts at offset {} (beyond header), will seek when streaming", data_off);
         }
+        info!("Starting WAV playback: {}Hz, {}ch, {}bit", sr, ch, bits);
 
         let mut file_buf = [0u8; 1024];
         let mut in_samples: heapless::Vec<u16, 512> = heapless::Vec::new();
         let mut out_samples: heapless::Vec<u16, 1024> = heapless::Vec::new();
+        let mut total_samples_read = 0u32;
+        let mut current_file_offset = hdr.len(); // We've read this much already
+        let data_offset = data_off; // data_off is the offset
+
+        // Skip data between header and data chunk if necessary
+        if current_file_offset < data_offset {
+            let skip_bytes = data_offset - current_file_offset;
+            info!("Skipping {} bytes to reach data chunk", skip_bytes);
+            let mut skip_buf = [0u8; 1024];
+            let mut remaining = skip_bytes;
+            while remaining > 0 {
+                let to_read = remaining.min(1024);
+                match volume_mgr.read(raw_file, &mut skip_buf[..to_read]) {
+                    Ok(n) if n > 0 => {
+                        remaining -= n;
+                        current_file_offset += n;
+                    }
+                    Ok(_) => {
+                        warn!("Unexpected end of file while skipping to data");
+                        let _ = volume_mgr.close_file(raw_file);
+                        return;
+                    }
+                    Err(e) => {
+                        warn!("Error skipping to data: {:?}", defmt::Debug2Format(&e));
+                        let _ = volume_mgr.close_file(raw_file);
+                        return;
+                    }
+                }
+            }
+            info!("Successfully skipped to data offset {}", current_file_offset);
+        }
 
         loop {
             let n = match volume_mgr.read(raw_file, &mut file_buf) {
                 Ok(n) => n,
-                Err(_) => 0,
+                Err(e) => {
+                    warn!("Error reading file data: {:?}", defmt::Debug2Format(&e));
+                    0
+                }
             };
             if n == 0 {
+                info!("End of file reached, total samples: {}", total_samples_read);
                 break;
             }
+            current_file_offset += n;
+            total_samples_read += (n / 2) as u32; // 2 bytes per sample
             in_samples.clear();
             let mut i = 0;
             while i + 1 < n && in_samples.len() < in_samples.capacity() {
-                let s = u16::from_le_bytes([file_buf[i], file_buf[i + 1]]);
-                let _ = in_samples.push(s);
+                // WAV stores 16-bit PCM as signed little-endian
+                let signed_sample = i16::from_le_bytes([file_buf[i], file_buf[i + 1]]);
+                // Amplify by 4x and convert signed to unsigned (add 0x8000 offset for SAI)
+                let amplified = (signed_sample as i32) * 4;
+                let clamped = amplified.clamp(-32768, 32767);
+                let unsigned_sample = (clamped + 0x8000) as u16;
+                let _ = in_samples.push(unsigned_sample);
                 i += 2;
             }
 
@@ -213,20 +307,22 @@ async fn sd_stream_task(
                         if stereo.len() + 2 > stereo.capacity() {
                             break;
                         }
-                        let _ = stereo.push(s);
-                        let _ = stereo.push(s);
+                        let _ = stereo.push(s); // Left channel
+                        let _ = stereo.push(s); // Right channel
                     }
                     last_sample_written = *stereo.last().unwrap_or(&0) as i16;
+                    info!("44.1k mono: {} -> {} stereo samples", in_samples.len(), stereo.len());
                     match sai_tx.write(&stereo).await {
-                        Ok(_) => {}
+                        Ok(_) => info!("SAI write OK"),
                         Err(e) => warn!("SAI write err {:?}", defmt::Debug2Format(&e)),
                     }
                 } else {
                     last_sample_written = *out_samples.last().unwrap_or(&0) as i16;
-                    match sai_tx.write(&out_samples).await {
-                        Ok(_) => {}
-                        Err(e) => warn!("SAI write err {:?}", defmt::Debug2Format(&e)),
-                    }
+                    info!("44.1k stereo: {} resampled samples", out_samples.len());
+                match sai_tx.write(&out_samples).await {
+                    Ok(_) => info!("SAI write OK"),
+                    Err(e) => warn!("SAI write err {:?}", defmt::Debug2Format(&e)),
+                }
                 }
             } else {
                 if channels == 1 {
@@ -240,17 +336,19 @@ async fn sd_stream_task(
                         let _ = stereo.push(s);
                     }
                     last_sample_written = *stereo.last().unwrap_or(&0) as i16;
+                    info!("48k mono: {} -> {} stereo samples", in_samples.len(), stereo.len());
                     match sai_tx.write(&stereo).await {
-                        Ok(_) => {}
+                        Ok(_) => info!("SAI write OK"),
                         Err(e) => warn!("SAI write err {:?}", defmt::Debug2Format(&e)),
                     }
-                } else {
-                    last_sample_written = *in_samples.last().unwrap_or(&0) as i16;
-                    match sai_tx.write(&in_samples).await {
-                        Ok(_) => {}
-                        Err(e) => warn!("SAI write err {:?}", defmt::Debug2Format(&e)),
-                    }
+            } else {
+                last_sample_written = ((*in_samples.last().unwrap_or(&0) as i32) - 0x8000) as i16;
+                info!("48k stereo: {} samples", in_samples.len());
+                match sai_tx.write(&in_samples).await {
+                    Ok(_) => info!("SAI write OK"),
+                    Err(e) => warn!("SAI write err {:?}", defmt::Debug2Format(&e)),
                 }
+            }
             }
 
             // Log approximately once per second
@@ -260,6 +358,74 @@ async fn sd_stream_task(
             }
         }
         let _ = volume_mgr.close_file(raw_file);
+    }
+
+    // If no valid WAV files found, generate a test tone
+    info!("No valid WAV files found, generating test tone");
+    // Generate a 1kHz sine wave at 48kHz sample rate
+    let sample_rate = 48000;
+    let frequency = 1000; // 1kHz
+    let mut phase_step = 0u16;
+    let phase_increment = ((frequency as u32 * 65536) / sample_rate as u32) as u16; // Fixed point phase increment
+
+    // Simple sine lookup table (quarter wave, 64 entries)
+    const SINE_TABLE: [i16; 64] = [
+        0, 3212, 6393, 9512, 12539, 15446, 18204, 20787,
+        23170, 25329, 27245, 28898, 30273, 31356, 32137, 32609,
+        32767, 32609, 32137, 31356, 30273, 28898, 27245, 25329,
+        23170, 20787, 18204, 15446, 12539, 9512, 6393, 3212,
+        0, -3212, -6393, -9512, -12539, -15446, -18204, -20787,
+        -23170, -25329, -27245, -28898, -30273, -31356, -32137, -32609,
+        -32767, -32609, -32137, -31356, -30273, -28898, -27245, -25329,
+        -23170, -20787, -18204, -15446, -12539, -9512, -6393, -3212,
+    ];
+
+    let mut samples: heapless::Vec<u16, 1024> = heapless::Vec::new();
+
+    // Generate continuous 1kHz sine wave
+    loop {
+        samples.clear();
+
+        // Generate 256 samples (about 5.3ms at 48kHz) of sine wave
+        for _ in 0..256 {
+            // Get sine value from lookup table (0-65535 maps to 0-255 in table)
+            let table_index = (phase_step >> 8) as usize & 0xFF;
+            let sine_val = if table_index < 64 {
+                SINE_TABLE[table_index]
+            } else if table_index < 128 {
+                SINE_TABLE[127 - table_index]
+            } else if table_index < 192 {
+                -SINE_TABLE[table_index - 128]
+            } else {
+                -SINE_TABLE[255 - table_index]
+            };
+
+            // Amplify sine wave by 4x and convert to unsigned 16-bit (offset by 32768)
+            let amplified = (sine_val as i32) * 4;
+            let clamped = amplified.clamp(-32768, 32767);
+            let sample = (clamped + 32768) as u16;
+
+            // Stereo: same sample for left and right
+            let _ = samples.push(sample);
+            let _ = samples.push(sample);
+
+            // Update phase (fixed point)
+            phase_step = phase_step.wrapping_add(phase_increment);
+        }
+
+        last_sample_written = (samples[0] as i32 - 32768) as i16;
+
+        info!("Writing {} sine wave samples", samples.len());
+        match sai_tx.write(&samples).await {
+            Ok(_) => info!("SAI write OK"),
+            Err(e) => warn!("SAI write err {:?}", defmt::Debug2Format(&e)),
+        }
+
+        // Log approximately once per second
+        if embassy_time::Instant::now() >= next_log {
+            info!("sine wave phase step: {}, last sample: {}", phase_step, last_sample_written);
+            next_log += embassy_time::Duration::from_secs(1);
+        }
     }
 }
 
@@ -340,9 +506,12 @@ async fn main(spawner: Spawner) {
         sai_cfg.frame_sync_polarity = sai::FrameSyncPolarity::ActiveLow;
         sai_cfg.frame_sync_offset = sai::FrameSyncOffset::BeforeFirstBit;
     }
-    sai_cfg.frame_length = 64;
-    sai_cfg.frame_sync_active_level_length = sai::word::U7(32);
+    sai_cfg.frame_length = 32;
+    sai_cfg.frame_sync_active_level_length = sai::word::U7(16);
     sai_cfg.fifo_threshold = sai::FifoThreshold::Quarter;
+    // For 48kHz sample rate, master clock should be 256x = 12.288 MHz
+    // Kernel clock is 49.152 MHz, so divider = 4
+    sai_cfg.master_clock_divider = sai::MasterClockDivider::DIV4;
 
     let sai_tx = Sai::new_asynchronous(
         sai_a,
@@ -353,6 +522,8 @@ async fn main(spawner: Spawner) {
         sai_dma_buf,
         sai_cfg,
     );
+
+    // SAI transmitters start automatically when writing, no need to call start()
 
     // (PWM removed)
 
