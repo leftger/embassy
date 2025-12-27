@@ -385,6 +385,17 @@ pub(crate) unsafe fn init(config: Config) {
         while !RCC.extcfgr().read().c2hpref() {}
     }
 
+    // Disable HSI if not used
+    if !config.hsi {
+        RCC.cr().modify(|w| w.set_hsion(false));
+    }
+
+    // Disable the HSI48, if not used
+    #[cfg(crs)]
+    if config.hsi48.is_none() {
+        super::disable_hsi48();
+    }
+
     config.mux.init();
 
     set_clocks!(

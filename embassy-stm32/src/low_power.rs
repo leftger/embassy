@@ -3,31 +3,31 @@
 //! The STM32 line of microcontrollers support various deep-sleep modes which exploit clock-gating
 //! to reduce power consumption. `embassy-stm32` provides a low-power executor, [`Executor`] which
 //! can use knowledge of which peripherals are currently blocked upon to transparently and safely
-//! enter such low-power modes (currently, only `STOP2`) when idle.
+//! enter such low-power modes including `STOP1` and `STOP2` when idle.
 //!
 //! The executor determines which peripherals are active by their RCC state; consequently,
-//! low-power states can only be entered if all peripherals have been `drop`'d. There are a few
-//! exceptions to this rule:
+//! low-power states can only be entered if peripherals which block stop have been `drop`'d and if
+//! peripherals that do not block stop are busy. Peripherals which never block stop include:
 //!
 //!  * `GPIO`
 //!  * `RTC`
 //!
+//! Other peripherals which block stop when busy include (this list may be stale):
+//!
+//!  * `I2C`
+//!  * `USART`
+//!
 //! Since entering and leaving low-power modes typically incurs a significant latency, the
 //! low-power executor will only attempt to enter when the next timer event is at least
-//! [`time_driver::min_stop_pause`] in the future.
+//! [`config.min_stop_pause`] in the future.
 //!
-//! Currently there is no macro analogous to `embassy_executor::main` for this executor;
-//! consequently one must define their entrypoint manually. Moreover, you must relinquish control
-//! of the `RTC` peripheral to the executor. This will typically look like
 //!
 //! ```rust,no_run
 //! use embassy_executor::Spawner;
-//! use embassy_stm32::low_power;
-//! use embassy_stm32::rtc::{Rtc, RtcConfig};
 //! use embassy_time::Duration;
 //!
-//! #[embassy_executor::main(executor = "low_power::Executor")]
-//! async fn async_main(spawner: Spawner) {
+//! #[embassy_executor::main(executor = "embassy_stm32::Executor", entry = "cortex_m_rt::entry")]
+//! async fn main(spawner: Spawner) {
 //!     // initialize the platform...
 //!     let mut config = embassy_stm32::Config::default();
 //!     // the default value, but can be adjusted
@@ -136,10 +136,10 @@ pub fn stop_ready(stop_mode: StopMode) -> bool {
     })
 }
 
-#[cfg(any(stm32l4, stm32l5, stm32u5, stm32wba, stm32wb, stm32wlex, stm32u0))]
+#[cfg(any(stm32l4, stm32l5, stm32u5, stm32wba, stm32wb, stm32wl, stm32u0))]
 use crate::pac::pwr::vals::Lpms;
 
-#[cfg(any(stm32l4, stm32l5, stm32u5, stm32wba, stm32wb, stm32wlex, stm32u0))]
+#[cfg(any(stm32l4, stm32l5, stm32u5, stm32wba, stm32wb, stm32wl, stm32u0))]
 impl Into<Lpms> for StopMode {
     fn into(self) -> Lpms {
         match self {
@@ -184,19 +184,28 @@ impl Executor {
 
     pub(crate) unsafe fn on_wakeup_irq_or_event() {
         if !get_driver().is_stopped() {
+            trace!("low power: time driver not stopped!");
             return;
         }
 
         critical_section::with(|cs| {
-            #[cfg(any(stm32wlex, stm32wb))]
+            #[cfg(any(stm32wl, stm32wb))]
             {
                 let es = crate::pac::PWR.extscr().read();
-                #[cfg(stm32wlex)]
+                #[cfg(stm32wl)]
                 match (es.c1stopf(), es.c1stop2f()) {
-                    (true, false) => debug!("low power: wake from STOP1"),
-                    (false, true) => debug!("low power: wake from STOP2"),
-                    (true, true) => debug!("low power: wake from STOP1 and STOP2 ???"),
-                    (false, false) => trace!("low power: stop mode not entered"),
+                    (true, false) => debug!("low power: cpu1 wake from STOP1"),
+                    (false, true) => debug!("low power: cpu1 wake from STOP2"),
+                    (true, true) => debug!("low power: cpu1 wake from STOP1 and STOP2 ???"),
+                    (false, false) => trace!("low power: cpu1 stop mode not entered"),
+                };
+                #[cfg(stm32wl5x)]
+                // TODO: only for the current cpu
+                match (es.c2stopf(), es.c2stop2f()) {
+                    (true, false) => debug!("low power: cpu2 wake from STOP1"),
+                    (false, true) => debug!("low power: cpu2 wake from STOP2"),
+                    (true, true) => debug!("low power: cpu2 wake from STOP1 and STOP2 ???"),
+                    (false, false) => trace!("low power: cpu2 stop mode not entered"),
                 };
 
                 #[cfg(stm32wb)]
@@ -206,11 +215,8 @@ impl Executor {
                     (true, true) => debug!("low power: cpu1 and cpu2 wake from STOP"),
                     (false, false) => trace!("low power: stop mode not entered"),
                 };
-                crate::pac::PWR.extscr().modify(|w| {
-                    w.set_c1cssf(false);
-                });
 
-                let has_stopped2 = {
+                let _has_stopped2 = {
                     #[cfg(stm32wb)]
                     {
                         es.c2stopf()
@@ -220,12 +226,19 @@ impl Executor {
                     {
                         es.c1stop2f()
                     }
+
+                    #[cfg(stm32wl5x)]
+                    {
+                        // TODO: I think we could just use c1stop2f() here as it won't enter a stop mode unless BOTH cpus will enter it.
+                        es.c1stop2f() | es.c2stop2f()
+                    }
                 };
 
-                if es.c1stopf() || has_stopped2 {
+                #[cfg(not(stm32wb))]
+                if es.c1stopf() || _has_stopped2 {
                     // when we wake from any stop mode we need to re-initialize the rcc
                     crate::rcc::init(RCC_CONFIG.unwrap());
-                    if has_stopped2 {
+                    if _has_stopped2 {
                         // when we wake from STOP2, we need to re-initialize the time driver
                         get_driver().init_timer(cs);
                         // reset the refcounts for STOP2 and STOP1 (initializing the time driver will increment one of them for the timer)
@@ -234,6 +247,13 @@ impl Executor {
                         REFCOUNT_STOP1 = 0;
                     }
                 }
+                // Clear all stop flags
+                #[cfg(stm32wl)]
+                crate::pac::PWR.extscr().modify(|w| {
+                    w.set_c1cssf(true);
+                    #[cfg(stm32wl5x)]
+                    w.set_c2cssf(true);
+                });
             }
             get_driver().resume_time(cs);
 
@@ -260,7 +280,10 @@ impl Executor {
     }
 
     #[cfg(all(stm32wb, feature = "low-power"))]
-    fn configure_stop_stm32wb(&self, _cs: CriticalSection) -> Result<(), ()> {
+    fn configure_stop_stm32wb(
+        &self,
+        _cs: CriticalSection,
+    ) -> Result<crate::hsem::HardwareSemaphoreMutex<'_, crate::peripherals::HSEM>, ()> {
         use core::task::Poll;
 
         use embassy_futures::poll_once;
@@ -286,7 +309,7 @@ impl Executor {
             if PWR.extscr().read().c2ds() {
                 drop(sem4_mutex);
             } else {
-                return Ok(());
+                return Ok(sem3_mutex);
             }
         }
 
@@ -312,31 +335,35 @@ impl Executor {
             w.set_smpssel(Smps::HSI);
         });
 
-        drop(sem3_mutex);
-
-        // on PWR
-        RCC.apb1enr1().modify(|r| r.0 |= 1 << 28);
-        cortex_m::asm::dsb();
-
-        // off SMPS, on Bypass
-        PWR.cr5().modify(|r| {
-            let mut val = r.0;
-            val &= !(1 << 15); // sdeb = 0 (off SMPS)
-            val |= 1 << 14; // sdben = 1 (on Bypass)
-            r.0 = val
-        });
-
-        cortex_m::asm::delay(1000);
-
-        Ok(())
+        Ok(sem3_mutex)
     }
 
     #[allow(unused_variables)]
     fn configure_stop(&self, _cs: CriticalSection, stop_mode: StopMode) -> Result<(), ()> {
-        #[cfg(all(stm32wb, feature = "low-power"))]
-        self.configure_stop_stm32wb(_cs)?;
+        #[cfg(stm32wb)]
+        let mutex = {
+            use crate::pac::{PWR, RCC};
 
-        #[cfg(any(stm32l4, stm32l5, stm32u5, stm32u0, stm32wb, stm32wba, stm32wlex))]
+            let mutex = self.configure_stop_stm32wb(_cs)?;
+
+            // on PWR
+            RCC.apb1enr1().modify(|r| r.0 |= 1 << 28);
+            cortex_m::asm::dsb();
+
+            // off SMPS, on Bypass
+            PWR.cr5().modify(|r| {
+                let mut val = r.0;
+                val &= !(1 << 15); // sdeb = 0 (off SMPS)
+                val |= 1 << 14; // sdben = 1 (on Bypass)
+                r.0 = val
+            });
+
+            cortex_m::asm::delay(1000);
+
+            mutex
+        };
+
+        #[cfg(any(stm32l4, stm32l5, stm32u5, stm32u0, stm32wb, stm32wba, stm32wl))]
         crate::pac::PWR.cr1().modify(|m| m.set_lpms(stop_mode.into()));
         #[cfg(stm32h5)]
         crate::pac::PWR.pmcr().modify(|v| {
@@ -345,15 +372,20 @@ impl Executor {
             v.set_svos(vals::Svos::SCALE3);
         });
 
+        #[cfg(stm32wb)]
+        drop(mutex);
+
         Ok(())
     }
 
     fn configure_pwr(&self) {
         Self::get_scb().clear_sleepdeep();
         // Clear any previous stop flags
-        #[cfg(stm32wlex)]
+        #[cfg(stm32wl)]
         crate::pac::PWR.extscr().modify(|w| {
             w.set_c1cssf(true);
+            #[cfg(stm32wl5x)]
+            w.set_c2cssf(true);
         });
 
         #[cfg(feature = "low-power-pender")]
