@@ -42,7 +42,7 @@ use core::future::poll_fn;
 use core::sync::atomic::{AtomicBool, Ordering, compiler_fence};
 use core::task::Poll;
 
-use embassy_futures::join;
+use embassy_futures::{join, yield_now};
 use embassy_sync::waitqueue::AtomicWaker;
 
 // Note: complete_ble_link_layer_init is now called as part of init_ble_stack()
@@ -57,6 +57,60 @@ const BLE_SLEEPMODE_RUNNING: u8 = 0;
 unsafe extern "C" {
     /// BLE stack process function - must be called to process BLE events
     fn BleStack_Process() -> u8;
+}
+
+// Task IDs for sequencer (matching ST's CFG_TASK_* defines)
+const CFG_TASK_BLE_HOST: u32 = 0;  // BleStack_Process task
+const TASK_BLE_HOST_MASK: u32 = 1 << CFG_TASK_BLE_HOST;
+const TASK_PRIO_BLE_HOST: u32 = 0;  // High priority
+
+/// BleStack_Process background task wrapper
+///
+/// This matches ST's BleStack_Process_BG function.
+/// Per ST: BLE_SLEEPMODE_RUNNING (0) means "has to be executed again"
+unsafe extern "C" fn ble_stack_process_bg() {
+    #[cfg(feature = "defmt")]
+    defmt::trace!("BleStack_Process_BG called");
+
+    let result = BleStack_Process();
+
+    #[cfg(feature = "defmt")]
+    defmt::trace!("BleStack_Process returned: {}", result);
+
+    // Per ST's implementation: when result == 0 (BLE_SLEEPMODE_RUNNING),
+    // the BLE stack needs to run again. Reschedule the task.
+    // This matches ST's BleStackCB_Process() which calls:
+    //   UTIL_SEQ_SetTask(1U << CFG_TASK_BLE_HOST, CFG_SEQ_PRIO_0);
+    if result == BLE_SLEEPMODE_RUNNING {
+        super::util_seq::UTIL_SEQ_SetTask(TASK_BLE_HOST_MASK, TASK_PRIO_BLE_HOST);
+    }
+}
+
+/// Register BLE stack tasks with the sequencer
+///
+/// This must be called during initialization to register BleStack_Process
+/// as a sequencer task (matching ST's APP_BLE_Init behavior).
+pub fn register_ble_tasks() {
+    unsafe {
+        // Register BLE Host stack process task (like ST's APP_BLE_Init does)
+        super::util_seq::UTIL_SEQ_RegTask(TASK_BLE_HOST_MASK, 0, Some(ble_stack_process_bg));
+
+        #[cfg(feature = "defmt")]
+        defmt::info!("BLE Host task registered with sequencer");
+    }
+}
+
+/// Schedule the BLE Host task to run
+///
+/// This triggers BleStack_Process to execute. Should be called after
+/// events that require BLE stack processing (e.g., after starting advertising).
+pub fn schedule_ble_host_task() {
+    unsafe {
+        super::util_seq::UTIL_SEQ_SetTask(TASK_BLE_HOST_MASK, TASK_PRIO_BLE_HOST);
+
+        #[cfg(feature = "defmt")]
+        defmt::trace!("BLE Host task scheduled");
+    }
 }
 
 /// Call BleStack_Process until it returns CPU_HALT
@@ -155,14 +209,16 @@ pub async fn ble_runner() -> ! {
                 BLE_WAKER.wake();
             }
         },
-        poll_fn(|cx| {
-            BLE_WAKER.register(cx.waker());
-            compiler_fence(Ordering::Release);
+        async {
+            loop {
+                // Process BLE stack continuously
+                // This MUST be called regularly to keep advertising alive and handle events
+                process_ble_stack();
 
-            process_ble_stack();
-
-            Poll::<()>::Pending
-        }),
+                // Yield to allow other tasks to run
+                embassy_futures::yield_now().await;
+            }
+        },
     )
     .await;
 
