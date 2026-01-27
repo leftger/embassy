@@ -104,11 +104,11 @@ use embassy_time::{Duration, block_for};
 
 use super::bindings::{link_layer, mac};
 
-// Missing constants from stm32-bindings - RADIO interrupt numbers
-// For STM32WBA65RI, the RADIO interrupt is position 66 (between ADC4=65 and WKUP=67)
-// Note: mac::RADIO_INTR_NUM is incorrectly set to 0 in stm32-bindings, so we override it here
+// RADIO interrupt numbers for STM32WBA
+// RADIO interrupt is position 66
+// SW low interrupt uses HASH peripheral interrupt (61) as per ST's implementation
 const RADIO_INTR_NUM: u32 = 66; // 2.4 GHz RADIO global interrupt
-const RADIO_SW_LOW_INTR_NUM: u32 = 67; // WKUP used as SW low interrupt
+const RADIO_SW_LOW_INTR_NUM: u32 = 61; // HASH interrupt used as SW low interrupt (per ST reference)
 
 type Callback = unsafe extern "C" fn();
 
@@ -236,6 +236,7 @@ fn set_basepri_max(value: u8) {
 }
 
 pub unsafe fn run_radio_high_isr() {
+    trace!("RADIO ISR: callback={:?}", load_callback(&RADIO_CALLBACK).is_some());
     if let Some(cb) = load_callback(&RADIO_CALLBACK) {
         cb();
     }
@@ -244,6 +245,7 @@ pub unsafe fn run_radio_high_isr() {
 }
 
 pub unsafe fn run_radio_sw_low_isr() {
+    trace!("HASH ISR (sw low): callback={:?}", load_callback(&LOW_ISR_CALLBACK).is_some());
     if let Some(cb) = load_callback(&LOW_ISR_CALLBACK) {
         cb();
     }
@@ -359,7 +361,7 @@ pub unsafe extern "C" fn LINKLAYER_PLAT_Assert(condition: u8) {
 //   */
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn LINKLAYER_PLAT_WaitHclkRdy() {
-    trace!("LINKLAYER_PLAT_WaitHclkRdy");
+    // trace!("LINKLAYER_PLAT_WaitHclkRdy"); // Too frequent, disabled
     if AHB5_SWITCHED_OFF.swap(false, Ordering::AcqRel) {
         let reference = RADIO_SLEEP_TIMER_VAL.load(Ordering::Acquire);
         trace!("LINKLAYER_PLAT_WaitHclkRdy: reference={}", reference);
@@ -566,7 +568,7 @@ pub unsafe extern "C" fn LINKLAYER_PLAT_TriggerSwLowIT(priority: u8) {
 //   */
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn LINKLAYER_PLAT_EnableIRQ() {
-    trace!("LINKLAYER_PLAT_EnableIRQ");
+    // trace!("LINKLAYER_PLAT_EnableIRQ"); // Too frequent, disabled
     //   irq_counter = max(0,irq_counter-1);
     //
     //   if(irq_counter == 0)
@@ -589,7 +591,7 @@ pub unsafe extern "C" fn LINKLAYER_PLAT_EnableIRQ() {
 //   */
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn LINKLAYER_PLAT_DisableIRQ() {
-    trace!("LINKLAYER_PLAT_DisableIRQ");
+    // trace!("LINKLAYER_PLAT_DisableIRQ"); // Too frequent, disabled
     //   if(irq_counter == 0)
     //   {
     //     /* Save primask bit at first interrupt disablement */

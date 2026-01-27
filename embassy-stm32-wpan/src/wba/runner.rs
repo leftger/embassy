@@ -38,11 +38,9 @@
 //! }
 //! ```
 
-use core::future::poll_fn;
-use core::sync::atomic::{AtomicBool, Ordering, compiler_fence};
-use core::task::Poll;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use embassy_futures::{join, yield_now};
+use embassy_futures::join;
 use embassy_sync::waitqueue::AtomicWaker;
 
 // Note: complete_ble_link_layer_init is now called as part of init_ble_stack()
@@ -91,13 +89,11 @@ unsafe extern "C" fn ble_stack_process_bg() {
 /// This must be called during initialization to register BleStack_Process
 /// as a sequencer task (matching ST's APP_BLE_Init behavior).
 pub fn register_ble_tasks() {
-    unsafe {
-        // Register BLE Host stack process task (like ST's APP_BLE_Init does)
-        super::util_seq::UTIL_SEQ_RegTask(TASK_BLE_HOST_MASK, 0, Some(ble_stack_process_bg));
+    // Register BLE Host stack process task (like ST's APP_BLE_Init does)
+    super::util_seq::UTIL_SEQ_RegTask(TASK_BLE_HOST_MASK, 0, Some(ble_stack_process_bg));
 
-        #[cfg(feature = "defmt")]
-        defmt::info!("BLE Host task registered with sequencer");
-    }
+    #[cfg(feature = "defmt")]
+    defmt::info!("BLE Host task registered with sequencer");
 }
 
 /// Schedule the BLE Host task to run
@@ -105,16 +101,31 @@ pub fn register_ble_tasks() {
 /// This triggers BleStack_Process to execute. Should be called after
 /// events that require BLE stack processing (e.g., after starting advertising).
 pub fn schedule_ble_host_task() {
-    unsafe {
-        super::util_seq::UTIL_SEQ_SetTask(TASK_BLE_HOST_MASK, TASK_PRIO_BLE_HOST);
+    super::util_seq::UTIL_SEQ_SetTask(TASK_BLE_HOST_MASK, TASK_PRIO_BLE_HOST);
 
-        #[cfg(feature = "defmt")]
-        defmt::trace!("BLE Host task scheduled");
-    }
+    #[cfg(feature = "defmt")]
+    defmt::trace!("BLE Host task scheduled");
 }
 
-/// Call BleStack_Process until it returns CPU_HALT
+/// Call BleStack_Process and run the sequencer to process pending tasks.
 /// Per ST docs: "When BleStack_Process returns BLE_SLEEPMODE_RUNNING, it shall be re-called"
+///
+/// This function is public so it can be called during synchronous init when
+/// the async runner isn't available yet. It also runs the sequencer to process
+/// any pending tasks that were scheduled by the BLE stack.
+pub fn pump_ble_stack() {
+    // First, process the BLE stack directly
+    process_ble_stack();
+
+    // Then run the sequencer to execute any pending tasks
+    // This matches ST's pattern where UTIL_SEQ_Run is called in the main loop
+    super::util_seq::run(super::util_seq::UTIL_SEQ_DEFAULT);
+
+    // Process BLE stack again in case the sequencer scheduled more work
+    process_ble_stack();
+}
+
+/// Internal function to process BLE stack
 fn process_ble_stack() {
     unsafe {
         let mut iterations = 0;

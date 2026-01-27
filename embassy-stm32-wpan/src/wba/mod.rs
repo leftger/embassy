@@ -20,4 +20,4 @@ pub use ble::{Ble, VersionInfo};
 pub use error::BleError;
 pub use gap_init::{GapInitParams, GapRole, IoCapability, PhyPrefs, SecurityParams};
 pub use linklayer_plat::{run_radio_high_isr, run_radio_sw_low_isr};
-pub use runner::{ble_runner, register_ble_tasks, schedule_ble_host_task};
+pub use runner::{ble_runner, pump_ble_stack, register_ble_tasks, schedule_ble_host_task};

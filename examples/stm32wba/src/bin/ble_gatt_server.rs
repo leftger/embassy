@@ -24,17 +24,19 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::peripherals::RNG;
 use embassy_stm32::rcc::{
-    AHB5Prescaler, AHBPrescaler, APBPrescaler, PllDiv, PllMul, PllPreDiv, PllSource, Sysclk, VoltageScale, mux,
+    AHB5Prescaler, AHBPrescaler, APBPrescaler, Hse, HsePrescaler, LsConfig, LseDrive, LseConfig, LseMode,
+    PllDiv, PllMul, PllPreDiv, PllSource, RtcClockSource, Sysclk, VoltageScale, mux,
 };
+use embassy_stm32::time::Hertz;
 use embassy_stm32::rng::{self, Rng};
-use embassy_stm32::{Config, bind_interrupts};
+use embassy_stm32::{Config, bind_interrupts, interrupt};
 use embassy_stm32_wpan::gap::{AdvData, AdvParams, AdvType, GapEvent};
 use embassy_stm32_wpan::gatt::{
     CHAR_VALUE_HANDLE_OFFSET, CccdValue, CharProperties, CharacteristicHandle, GattEventMask, GattServer,
     SecurityPermissions, ServiceHandle, ServiceType, Uuid, is_cccd_handle, is_value_handle,
 };
 use embassy_stm32_wpan::hci::event::EventParams;
-use embassy_stm32_wpan::{Ble, ble_runner};
+use embassy_stm32_wpan::{Ble, ble_runner, pump_ble_stack, run_radio_high_isr, run_radio_sw_low_isr};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use static_cell::StaticCell;
@@ -43,6 +45,19 @@ use {defmt_rtt as _, panic_probe as _};
 bind_interrupts!(struct Irqs {
     RNG => rng::InterruptHandler<embassy_stm32::peripherals::RNG>;
 });
+
+// RADIO interrupt handler - required for BLE stack operation
+#[cortex_m_rt::interrupt]
+unsafe fn RADIO() {
+    unsafe { run_radio_high_isr() };
+}
+
+// HASH interrupt handler - used as software low-priority interrupt for BLE
+// (ST repurposes the HASH peripheral interrupt for BLE stack software interrupt)
+#[cortex_m_rt::interrupt]
+unsafe fn HASH() {
+    unsafe { run_radio_sw_low_isr() };
+}
 
 /// BLE runner task - drives the BLE stack sequencer
 #[embassy_executor::task]
@@ -67,6 +82,24 @@ struct AppState {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let mut config = Config::default();
+
+    // Enable HSE (32 MHz external crystal) - REQUIRED for BLE radio
+    config.rcc.hse = Some(Hse {
+        prescaler: HsePrescaler::DIV1,
+    });
+
+    // Enable LSE (32.768 kHz external crystal) - REQUIRED for BLE radio sleep timer
+    // The radio uses LSE for accurate timing during sleep
+    config.rcc.ls = LsConfig {
+        rtc: RtcClockSource::LSE,
+        lsi: false,
+        lse: Some(LseConfig {
+            frequency: Hertz(32_768),
+            mode: LseMode::Oscillator(LseDrive::MediumLow),
+            // Must be true for radio to use LSE
+            peripherals_clocked: true,
+        }),
+    };
 
     // Configure PLL1 (required on WBA)
     config.rcc.pll1 = Some(embassy_stm32::rcc::Pll {
@@ -104,9 +137,15 @@ async fn main(spawner: Spawner) {
     // Spawn the BLE runner task (required for proper BLE operation)
     spawner.spawn(ble_runner_task().expect("Failed to create BLE runner task"));
 
+    // Give the BLE runner a chance to start processing
+    // This is needed because BLE operations require BleStack_Process to run
+    embassy_futures::yield_now().await;
+    info!("BLE runner started");
+
     // Initialize GATT server
     let mut gatt = GattServer::new();
     gatt.init().expect("GATT initialization failed");
+    pump_ble_stack(); // Process any pending BLE stack work
 
     // Create custom service
     let service_uuid = Uuid::from_u16(CUSTOM_SERVICE_UUID);
@@ -114,6 +153,7 @@ async fn main(spawner: Spawner) {
         .add_service(service_uuid, ServiceType::Primary, 6)
         .expect("Failed to add service");
     info!("Service created: handle 0x{:04X}", service_handle.0);
+    pump_ble_stack();
 
     // Add data characteristic with read/write/notify
     let char_uuid = Uuid::from_u16(DATA_CHAR_UUID);
@@ -136,11 +176,13 @@ async fn main(spawner: Spawner) {
         data_char_handle.0 + CHAR_VALUE_HANDLE_OFFSET
     );
     info!("  CCCD handle: 0x{:04X}", data_char_handle.0 + 2);
+    pump_ble_stack();
 
     // Set initial value
     let initial_value = b"Hello!";
     gatt.update_characteristic_value(service_handle, data_char_handle, 0, initial_value)
         .expect("Failed to set initial value");
+    pump_ble_stack();
 
     // Application state
     let mut state = AppState {
@@ -173,6 +215,7 @@ async fn main(spawner: Spawner) {
             .start(adv_params.clone(), adv_data.clone(), None)
             .expect("Failed to start advertising");
     }
+    pump_ble_stack(); // Process advertising start command
 
     info!("GATT Server started as 'Embassy-GATT'");
     info!("Waiting for connections...");

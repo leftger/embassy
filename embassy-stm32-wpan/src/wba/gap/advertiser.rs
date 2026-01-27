@@ -3,7 +3,6 @@
 use super::types::{AdvData, AdvParams, AdvType};
 use crate::wba::error::BleError;
 use crate::wba::hci::command::CommandSender;
-use crate::wba::hci::types::AddressType;
 
 /// BLE Advertiser
 ///
