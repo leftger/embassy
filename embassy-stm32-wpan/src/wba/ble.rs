@@ -112,6 +112,11 @@ impl Ble {
             BleError::InitializationFailed
         })?;
 
+        // Register BLE tasks with the sequencer (required for BleStackCB_Process to work)
+        // This matches ST's APP_BLE_Init which calls:
+        //   UTIL_SEQ_RegTask(1U << CFG_TASK_BLE_HOST, UTIL_SEQ_RFU, BleStack_Process_BG);
+        crate::wba::runner::register_ble_tasks();
+
         #[cfg(feature = "defmt")]
         defmt::info!("Ble::init: BLE stack initialized, sending HCI reset");
 

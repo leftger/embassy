@@ -1099,8 +1099,8 @@ pub unsafe extern "C" fn BLECB_Indication(data: *const u8, length: u16, _ext_dat
                 defmt::trace!("Event queued successfully");
 
                 // Signal BleStack_Process to run again
-                // This is equivalent to Sidewalk SDK's osSemaphoreRelease(BleHostSemaphore)
-                super::runner::BLE_WAKER.wake();
+                // Schedule the BLE host task to process this event
+                super::runner::schedule_ble_host_task();
             }
             Err(_) => {
                 #[cfg(feature = "defmt")]

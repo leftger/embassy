@@ -38,14 +38,8 @@
 //! }
 //! ```
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
-use embassy_futures::join;
-use embassy_sync::waitqueue::AtomicWaker;
-
 // Note: complete_ble_link_layer_init is now called as part of init_ble_stack()
 // in Ble::init(), so we no longer need to call it from the runner.
-use super::util_seq;
 
 // BleStack_Process return values
 const BLE_SLEEPMODE_RUNNING: u8 = 0;
@@ -107,138 +101,88 @@ pub fn schedule_ble_host_task() {
     defmt::trace!("BLE Host task scheduled");
 }
 
-/// Call BleStack_Process and run the sequencer to process pending tasks.
-/// Per ST docs: "When BleStack_Process returns BLE_SLEEPMODE_RUNNING, it shall be re-called"
+/// Pump the BLE stack to process pending work.
 ///
-/// This function is public so it can be called during synchronous init when
-/// the async runner isn't available yet. It also runs the sequencer to process
-/// any pending tasks that were scheduled by the BLE stack.
+/// This function schedules the BLE host task and runs the sequencer repeatedly
+/// until there's no more work to do. This matches ST's main loop pattern where
+/// UTIL_SEQ_Run(UTIL_SEQ_DEFAULT) is called repeatedly in MX_APPE_Process().
+///
+/// This is safe to call during initialization before the async BLE runner starts,
+/// as it directly drives the sequencer instead of relying on the runner task.
 pub fn pump_ble_stack() {
-    // First, process the BLE stack directly
-    process_ble_stack();
+    // Schedule the BLE host task to ensure it runs
+    schedule_ble_host_task();
 
-    // Then run the sequencer to execute any pending tasks
-    // This matches ST's pattern where UTIL_SEQ_Run is called in the main loop
-    super::util_seq::run(super::util_seq::UTIL_SEQ_DEFAULT);
+    // Run the sequencer until there's no more pending work.
+    // Keep running while the sequencer has tasks to execute.
+    let mut iterations = 0;
+    loop {
+        let had_work = super::util_seq::run(super::util_seq::UTIL_SEQ_DEFAULT);
 
-    // Process BLE stack again in case the sequencer scheduled more work
-    process_ble_stack();
-}
+        iterations += 1;
 
-/// Internal function to process BLE stack
-fn process_ble_stack() {
-    unsafe {
-        let mut iterations = 0;
-        loop {
-            let result = BleStack_Process();
+        // If no tasks were executed and no more work is pending, we're done
+        if !had_work && !super::util_seq::has_pending_work() {
+            break;
+        }
 
+        // Safety limit to prevent infinite loop
+        if iterations >= 50 {
             #[cfg(feature = "defmt")]
-            if iterations == 0 {
-                defmt::trace!("BleStack_Process called, result={}", result);
-            }
-
-            if result != BLE_SLEEPMODE_RUNNING {
-                // CPU can halt, no more work to do
-                break;
-            }
-
-            iterations += 1;
-
-            // Safety limit to prevent infinite loop
-            if iterations > 1000 {
-                #[cfg(feature = "defmt")]
-                defmt::warn!("BleStack_Process called {} times, breaking to prevent hang", iterations);
-                break;
-            }
+            defmt::warn!("pump_ble_stack: {} iterations, breaking", iterations);
+            break;
         }
+    }
 
-        #[cfg(feature = "defmt")]
-        if iterations > 10 {
-            defmt::debug!("BleStack_Process completed after {} iterations", iterations);
-        }
+    #[cfg(feature = "defmt")]
+    if iterations > 5 {
+        defmt::trace!("pump_ble_stack: completed after {} iterations", iterations);
     }
 }
 
-/// Whether the link layer init has been completed
-static LL_INIT_COMPLETED: AtomicBool = AtomicBool::new(false);
-
-/// Signal to trigger BleStack_Process (equivalent to Sidewalk SDK's BleHostSemaphore)
-pub(crate) static BLE_WAKER: AtomicWaker = AtomicWaker::new();
+/// Internal function to process BLE stack in the async runner
+///
+/// This just runs the sequencer once to process any pending tasks.
+/// The sequencer will run both BLE host and link layer tasks as needed.
+fn process_ble_stack() {
+    // Just run the sequencer to process any pending tasks
+    // The sequencer will handle calling BleStack_Process via the BLE host task
+    super::util_seq::run(super::util_seq::UTIL_SEQ_DEFAULT);
+}
 
 /// BLE stack runner function
 ///
-/// This async function drives the BLE stack. It must be spawned as a task
-/// to enable proper BLE operation.
+/// This async function drives the BLE stack by continuously running the sequencer.
+/// It matches ST's main loop pattern: while(1) { UTIL_SEQ_Run(UTIL_SEQ_DEFAULT); }
 ///
-/// # Example
-///
-/// ```no_run
-/// use embassy_executor::Spawner;
-/// use embassy_stm32_wpan::wba::ble_runner;
-///
-/// #[embassy_executor::task]
-/// async fn ble_runner_task() {
-///     ble_runner().await
-/// }
-///
-/// #[embassy_executor::main]
-/// async fn main(spawner: Spawner) {
-///     // Initialize BLE...
-///
-///     // Spawn the runner
-///     spawner.spawn(ble_runner_task()).unwrap();
-///
-///     // Your BLE application logic...
-/// }
-/// ```
+/// This function should be spawned as a background task to keep the BLE stack processing.
 pub async fn ble_runner() -> ! {
     #[cfg(feature = "defmt")]
-    defmt::info!("BLE runner started");
+    defmt::info!("BLE runner started - processing sequencer continuously");
 
-    // Mark that the runner has started (BLE init is now done via init_ble_stack())
-    if !LL_INIT_COMPLETED.load(Ordering::Acquire) {
+    let mut iteration_count = 0u32;
+
+    loop {
+        // Run the sequencer to process any pending BLE tasks
+        // This matches ST's pattern: UTIL_SEQ_Run(UTIL_SEQ_DEFAULT) in a while loop
+        process_ble_stack();
+
+        iteration_count = iteration_count.wrapping_add(1);
+
+        // Log periodically to show runner is active
         #[cfg(feature = "defmt")]
-        defmt::trace!("BLE runner: first run, initializing sequencer context");
+        if iteration_count % 1000 == 0 {
+            defmt::trace!("BLE runner: {} iterations", iteration_count);
+        }
 
-        // Do one context switch to initialize the sequencer
-        util_seq::seq_resume();
-
-        LL_INIT_COMPLETED.store(true, Ordering::Release);
-
-        #[cfg(feature = "defmt")]
-        defmt::trace!("BLE runner: sequencer context initialized");
+        // Yield to allow other async tasks to run
+        embassy_futures::yield_now().await;
     }
-
-    join::join(
-        async {
-            loop {
-                util_seq::wait_for_event().await;
-
-                // Resume the sequencer context
-                // This will run BLE stack tasks until the sequencer yields
-                util_seq::seq_resume();
-                BLE_WAKER.wake();
-            }
-        },
-        async {
-            loop {
-                // Process BLE stack continuously
-                // This MUST be called regularly to keep advertising alive and handle events
-                process_ble_stack();
-
-                // Yield to allow other tasks to run
-                embassy_futures::yield_now().await;
-            }
-        },
-    )
-    .await;
-
-    loop {}
 }
 
-/// Integrate with the link layer ISR to wake the runner
+/// Called from radio interrupt handler
 ///
-/// This should be called from the radio interrupt handler.
+/// This schedules the link layer task to run
 pub fn on_radio_interrupt() {
-    util_seq::seq_pend();
+    schedule_ble_host_task();
 }

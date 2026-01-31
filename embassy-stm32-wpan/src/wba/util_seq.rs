@@ -98,8 +98,14 @@ fn mask_to_index(mask: u32) -> Option<usize> {
 
 /// Run the sequencer with the given task mask.
 /// Use UTIL_SEQ_DEFAULT (0xFFFFFFFF) to run all tasks.
-pub fn run(mask: u32) {
-    SEQUENCER.run(mask);
+/// Returns true if at least one task was executed.
+pub fn run(mask: u32) -> bool {
+    SEQUENCER.run(mask)
+}
+
+/// Check if there are any pending tasks or events
+pub fn has_pending_work() -> bool {
+    SEQUENCER.has_work()
 }
 
 /// Default mask value for running all tasks (matches ST's UTIL_SEQ_DEFAULT)
@@ -236,8 +242,12 @@ impl Sequencer {
     ///
     /// This function supports re-entrant calls (UTIL_SEQ_WaitEvt calls this recursively).
     /// The mask parameter restricts which tasks can run in this invocation.
-    pub fn run(&self, mask: u32) {
+    ///
+    /// Returns true if at least one task was executed.
+    pub fn run(&self, mask: u32) -> bool {
         compiler_fence(Ordering::Acquire);
+
+        let mut executed_any = false;
 
         // Save and update SuperMask for nested calls
         // Each nested call makes the mask MORE restrictive (following ST's implementation)
@@ -257,6 +267,8 @@ impl Sequencer {
                         unsafe {
                             task();
                         }
+
+                        executed_any = true;
 
                         // Force a fresh read of the pending bitmask after each task completion.
                         // TODO: this appears to do nothing (will be optimized away)
@@ -280,6 +292,8 @@ impl Sequencer {
         self.current_task_idx.store(NO_TASK_RUNNING, Ordering::Release);
 
         compiler_fence(Ordering::Release);
+
+        executed_any
     }
 }
 
@@ -288,7 +302,7 @@ impl Sequencer {
 /// Per ST API: UTIL_SEQ_Run(UTIL_SEQ_DEFAULT) runs all tasks.
 #[unsafe(no_mangle)]
 pub extern "C" fn UTIL_SEQ_Run(mask: u32) {
-    run(mask);
+    let _ = run(mask); // Discard return value for C compatibility
 }
 
 #[unsafe(no_mangle)]

@@ -82,6 +82,9 @@ pub fn set_discoverable(
     local_name: Option<&[u8]>,
     service_uuid_bytes: Option<&[u8]>,
 ) -> Result<(), BleError> {
+    #[cfg(feature = "defmt")]
+    defmt::trace!("set_discoverable: preparing to call ACI_GAP_SET_DISCOVERABLE");
+
     unsafe {
         let (name_ptr, name_len) = match local_name {
             Some(name) => (name.as_ptr(), name.len() as u8),
@@ -92,6 +95,10 @@ pub fn set_discoverable(
             Some(uuid_bytes) => (uuid_bytes.as_ptr(), uuid_bytes.len() as u8),
             None => (core::ptr::null(), 0),
         };
+
+        #[cfg(feature = "defmt")]
+        defmt::trace!("set_discoverable: calling ACI_GAP_SET_DISCOVERABLE (type={}, int_min={}, int_max={})",
+            adv_type, interval_min, interval_max);
 
         let status = aci_gap_set_discoverable(
             adv_type,
@@ -106,6 +113,9 @@ pub fn set_discoverable(
             0,     // slave_conn_interval_min (use default)
             0,     // slave_conn_interval_max (use default)
         );
+
+        #[cfg(feature = "defmt")]
+        defmt::trace!("set_discoverable: ACI_GAP_SET_DISCOVERABLE returned: 0x{:02X}", status);
 
         if status == BLE_STATUS_SUCCESS {
             #[cfg(feature = "defmt")]

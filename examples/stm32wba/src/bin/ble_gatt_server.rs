@@ -134,13 +134,14 @@ async fn main(spawner: Spawner) {
     ble.init().expect("BLE initialization failed");
     info!("BLE stack initialized");
 
-    // Spawn the BLE runner task (required for proper BLE operation)
+    // Spawn the BLE runner task BEFORE starting advertising
+    // The runner continuously executes the sequencer, which is needed for
+    // advertising and other BLE operations to work properly
     spawner.spawn(ble_runner_task().expect("Failed to create BLE runner task"));
 
-    // Give the BLE runner a chance to start processing
-    // This is needed because BLE operations require BleStack_Process to run
+    // Give the runner a chance to start
     embassy_futures::yield_now().await;
-    info!("BLE runner started");
+    info!("BLE runner spawned");
 
     // Initialize GATT server
     let mut gatt = GattServer::new();
@@ -183,8 +184,10 @@ async fn main(spawner: Spawner) {
     gatt.update_characteristic_value(service_handle, data_char_handle, 0, initial_value)
         .expect("Failed to set initial value");
     pump_ble_stack();
+    info!("DEBUG: After initial value pump");
 
     // Application state
+    info!("DEBUG: Creating AppState");
     let mut state = AppState {
         service_handle,
         data_char_handle,
@@ -192,14 +195,20 @@ async fn main(spawner: Spawner) {
         current_conn_handle: None,
         counter: 0,
     };
+    info!("DEBUG: AppState created");
 
     // Create advertising data
+    info!("DEBUG: Creating AdvData");
     let mut adv_data = AdvData::new();
+    info!("DEBUG: AdvData::new() done");
     adv_data.add_flags(0x06).expect("Failed to add flags");
+    info!("DEBUG: add_flags done");
     adv_data.add_name("Embassy-GATT").expect("Failed to add name");
+    info!("DEBUG: add_name done");
     adv_data
         .add_service_uuid_16(CUSTOM_SERVICE_UUID)
         .expect("Failed to add service UUID");
+    info!("DEBUG: add_service_uuid_16 done");
 
     let adv_params = AdvParams {
         interval_min: 0x0050,
@@ -207,15 +216,20 @@ async fn main(spawner: Spawner) {
         adv_type: AdvType::ConnectableUndirected,
         ..AdvParams::default()
     };
+    info!("DEBUG: AdvParams created");
 
     // Start advertising
+    info!("DEBUG: Getting advertiser");
     {
         let mut advertiser = ble.advertiser();
+        info!("DEBUG: Got advertiser, calling start");
         advertiser
             .start(adv_params.clone(), adv_data.clone(), None)
             .expect("Failed to start advertising");
+        info!("DEBUG: advertiser.start() returned");
     }
     pump_ble_stack(); // Process advertising start command
+    info!("DEBUG: After advertising pump");
 
     info!("GATT Server started as 'Embassy-GATT'");
     info!("Waiting for connections...");
