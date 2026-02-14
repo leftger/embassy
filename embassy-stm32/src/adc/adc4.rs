@@ -150,6 +150,29 @@ pub enum DacChannel {
     OUT2,
 }
 
+/// ADC trigger frequency mode.
+///
+/// This setting controls whether the ADC uses high or low frequency trigger mode.
+/// Low frequency mode must be used when there is a long delay between ADC enable
+/// and conversion start trigger, or between two conversion start triggers.
+/// In low frequency mode, some rearm cycles are inserted before conversion start,
+/// inducing a delay of 2 ADC clock cycles.
+///
+/// Refer to the device datasheet parameter "tIdle" for the maximum idle duration
+/// allowed in high frequency mode.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum TriggerFrequencyMode {
+    /// High frequency trigger mode (default).
+    /// Use when triggers occur frequently with short idle times.
+    #[default]
+    High,
+    /// Low frequency trigger mode.
+    /// Use when there are long idle times between triggers (exceeding datasheet tIdle parameter).
+    /// Adds 2 ADC clock cycles of delay before each conversion.
+    Low,
+}
+
 /// Number of samples used for averaging.
 #[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -396,6 +419,11 @@ impl<'d, T: Instance<Regs = crate::pac::adc::Adc4>> super::Adc<'d, T> {
             w.set_chselrmod(Chselrmod::ENABLE_INPUT);
         });
 
+        // Set trigger frequency mode to high frequency (default)
+        T::regs().cfgr2().modify(|w| {
+            w.set_lftrig(false);
+        });
+
         // only use one channel at the moment
         T::regs().smpr().modify(|w| {
             #[cfg(stm32u5)]
@@ -500,6 +528,31 @@ impl<'d, T: Instance<Regs = crate::pac::adc::Adc4>> super::Adc<'d, T> {
             w.set_ovsr(samples);
             w.set_ovss(right_shift);
             w.set_ovse(enable)
+        })
+    }
+
+    /// Set the ADC trigger frequency mode.
+    ///
+    /// This configures whether the ADC uses high or low frequency trigger mode.
+    /// Low frequency mode must be selected when there is a long delay between:
+    /// - ADC enable and conversion start trigger, or
+    /// - Two consecutive conversion start triggers
+    ///
+    /// In low frequency mode, additional rearm cycles (2 ADC clock cycles) are
+    /// inserted before each conversion to ensure proper operation.
+    ///
+    /// # Note
+    /// According to the device datasheet, low frequency mode must be used when
+    /// the idle time exceeds the "tIdle" parameter. Refer to your device's
+    /// datasheet for the specific tIdle value.
+    ///
+    /// This setting can only be modified when the ADC is disabled.
+    pub fn set_trigger_frequency_mode_adc4(&mut self, mode: TriggerFrequencyMode) {
+        T::regs().cfgr2().modify(|w| {
+            w.set_lftrig(match mode {
+                TriggerFrequencyMode::High => false,
+                TriggerFrequencyMode::Low => true,
+            })
         })
     }
 }
