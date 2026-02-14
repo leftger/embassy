@@ -2,7 +2,7 @@
 use pac::adc::vals::{Adc4Dmacfg as Dmacfg, Adc4Exten as Exten, Adc4OversamplingRatio as OversamplingRatio};
 #[allow(unused)]
 #[cfg(stm32wba)]
-use pac::adc::vals::{Chselrmod, Cont, Dmacfg, Exten, OversamplingRatio, Ovss, Smpsel};
+use pac::adc::vals::{Chselrmod, Cont, Dmacfg, Exten, OversamplingRatio, Ovss, Smpsel, Tovs};
 
 use super::blocking_delay_us;
 use crate::adc::{AdcRegs, ConversionMode, Instance};
@@ -171,6 +171,30 @@ pub enum TriggerFrequencyMode {
     /// Use when there are long idle times between triggers (exceeding datasheet tIdle parameter).
     /// Adds 2 ADC clock cycles of delay before each conversion.
     Low,
+}
+
+/// ADC triggered oversampling mode.
+///
+/// This setting controls the oversampling behavior when using external triggers.
+/// It determines whether the oversampling counter resets on each trigger or
+/// continues accumulating across multiple triggers.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum TriggeredOversamplingMode {
+    /// Single trigger mode (continuous oversampling, default).
+    ///
+    /// Oversampling completes on a single trigger event. The oversampling counter
+    /// accumulates the configured number of samples from one trigger event.
+    /// This is the typical mode for most applications.
+    #[default]
+    SingleTrigger,
+    /// Multi-trigger mode (discontinuous/triggered oversampling).
+    ///
+    /// Oversampling accumulates across multiple trigger events. Each trigger
+    /// adds one sample to the oversampling accumulator until the configured
+    /// ratio is reached. Useful when you want to oversample data from multiple
+    /// triggered conversions.
+    MultiTrigger,
 }
 
 /// Number of samples used for averaging.
@@ -420,8 +444,11 @@ impl<'d, T: Instance<Regs = crate::pac::adc::Adc4>> super::Adc<'d, T> {
         });
 
         // Set trigger frequency mode to high frequency (default)
+        // Set triggered oversampling mode to single trigger (default)
         T::regs().cfgr2().modify(|w| {
             w.set_lftrig(false);
+            #[cfg(stm32wba)]
+            w.set_tovs(Tovs::ALL_AFTER_TRIGGER);
         });
 
         // only use one channel at the moment
@@ -552,6 +579,41 @@ impl<'d, T: Instance<Regs = crate::pac::adc::Adc4>> super::Adc<'d, T> {
             w.set_lftrig(match mode {
                 TriggerFrequencyMode::High => false,
                 TriggerFrequencyMode::Low => true,
+            })
+        })
+    }
+
+    /// Set the ADC triggered oversampling mode.
+    ///
+    /// This configures how oversampling behaves with external triggers:
+    ///
+    /// - **SingleTrigger** (default): Oversampling completes within a single trigger event.
+    ///   All samples for the oversampling ratio are acquired from one trigger.
+    ///
+    /// - **MultiTrigger**: Oversampling accumulates across multiple triggers. Each trigger
+    ///   contributes one sample until the oversampling ratio is reached. This is useful
+    ///   when you want to oversample multiple triggered conversions over time.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // For oversampling within a single trigger event (typical use)
+    /// adc.set_triggered_oversampling_mode_adc4(TriggeredOversamplingMode::SingleTrigger);
+    ///
+    /// // For oversampling across multiple trigger events
+    /// adc.set_triggered_oversampling_mode_adc4(TriggeredOversamplingMode::MultiTrigger);
+    /// ```
+    ///
+    /// # Note
+    /// This setting only applies when oversampling is enabled and an external trigger is used.
+    /// For software-triggered conversions, this setting has no effect.
+    ///
+    /// This setting can only be modified when the ADC is disabled.
+    pub fn set_triggered_oversampling_mode_adc4(&mut self, mode: TriggeredOversamplingMode) {
+        #[cfg(stm32wba)]
+        T::regs().cfgr2().modify(|w| {
+            w.set_tovs(match mode {
+                TriggeredOversamplingMode::SingleTrigger => Tovs::ALL_AFTER_TRIGGER,
+                TriggeredOversamplingMode::MultiTrigger => Tovs::EACH_AFTER_TRIGGER,
             })
         })
     }
