@@ -62,6 +62,8 @@
 //! - Use constant-time operations when possible (hardware provides this)
 //! - Clear sensitive data from memory after use
 
+pub mod p256;
+
 use core::marker::PhantomData;
 
 use embassy_hal_internal::{Peri, PeripheralType};
