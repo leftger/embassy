@@ -9,14 +9,15 @@
 #![no_main]
 
 use defmt::{info, unwrap};
+use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::Config;
 use embassy_stm32::flash::Flash;
 use embassy_stm32::rcc::{
-    AHB5Prescaler, AHBPrescaler, APBPrescaler, PllDiv, PllMul, PllPreDiv, PllSource, Sysclk, VoltageScale, mux,
+    AHB5Prescaler, AHBPrescaler, APBPrescaler, PllDiv, PllMul, PllPreDiv, PllSource, Sysclk, VoltageScale,
 };
 use embassy_time::Timer;
-use {defmt_rtt as _, panic_probe as _};
+use panic_probe as _;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -37,9 +38,6 @@ async fn main(_spawner: Spawner) {
     config.rcc.ahb5_pre = AHB5Prescaler::DIV4;
     config.rcc.voltage_scale = VoltageScale::RANGE1;
     config.rcc.sys = Sysclk::PLL1_R;
-
-    // SAI clock source: HSI (flash example does not use SAI; avoids requiring PLL1.P)
-    config.rcc.mux.sai1sel = mux::Sai1sel::HSI;
 
     let p = embassy_stm32::init(config);
     info!("STM32WBA6 Flash example (quad-word programming)");

@@ -29,6 +29,7 @@
 use core::cell::RefCell;
 
 use defmt::*;
+use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::aes::{self, Aes};
 use embassy_stm32::mode::Blocking;
@@ -36,7 +37,7 @@ use embassy_stm32::peripherals::{AES as AesPeriph, PKA as PkaPeriph, RNG};
 use embassy_stm32::pka::{self, Pka};
 use embassy_stm32::rcc::{
     AHB5Prescaler, AHBPrescaler, APBPrescaler, Hse, HsePrescaler, LsConfig, LseConfig, LseDrive, LseMode, Pll, PllDiv,
-    PllMul, PllPreDiv, PllSource, RtcClockSource, Sysclk, VoltageScale, mux,
+    PllMul, PllPreDiv, PllSource, RtcClockSource, Sysclk, VoltageScale,
 };
 use embassy_stm32::rng::{self, Rng};
 use embassy_stm32::time::Hertz;
@@ -53,8 +54,8 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embedded_io_async::{Read, Write};
+use panic_probe as _;
 use static_cell::StaticCell;
-use {defmt_rtt as _, panic_probe as _};
 
 // Interrupt bindings
 bind_interrupts!(struct Irqs {
@@ -205,7 +206,6 @@ async fn main(spawner: Spawner) {
     config.rcc.ahb5_pre = AHB5Prescaler::DIV4;
     config.rcc.voltage_scale = VoltageScale::RANGE1;
     config.rcc.sys = Sysclk::PLL1_R;
-    config.rcc.mux.rngsel = mux::Rngsel::HSI;
 
     let p = embassy_stm32::init(config);
 

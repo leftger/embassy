@@ -2,13 +2,14 @@
 #![no_main]
 
 use defmt::*;
+use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::Config;
 use embassy_stm32::rcc::{
-    AHB5Prescaler, AHBPrescaler, APBPrescaler, PllDiv, PllMul, PllPreDiv, PllSource, Sysclk, VoltageScale, mux,
+    AHB5Prescaler, AHBPrescaler, APBPrescaler, PllDiv, PllMul, PllPreDiv, PllSource, Sysclk, VoltageScale,
 };
 use embassy_stm32_wpan::bindings::mac::{ST_MAC_callbacks_t, ST_MAC_init};
-use {defmt_rtt as _, panic_probe as _};
+use panic_probe as _;
 
 static _MAC_CALLBACKS: ST_MAC_callbacks_t = ST_MAC_callbacks_t {
     mlmeAssociateCnfCb: None,       // ST_MAC_MLMEAssociateCnfCbPtr,
@@ -67,11 +68,6 @@ async fn main(_spawner: Spawner) {
     config.rcc.voltage_scale = VoltageScale::RANGE1;
     // route PLL1_P into the USB‐OTG‐HS block
     config.rcc.sys = Sysclk::PLL1_R;
-
-    // let p = embassy_stm32::init(config);
-
-    // config.rcc.sys = Sysclk::HSI;
-    config.rcc.mux.rngsel = mux::Rngsel::HSI;
 
     let _p = embassy_stm32::init(config);
     info!("Hello World!");

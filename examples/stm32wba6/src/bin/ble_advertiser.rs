@@ -20,6 +20,7 @@
 use core::cell::RefCell;
 
 use defmt::*;
+use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::aes::{self, Aes};
 use embassy_stm32::mode::Blocking;
@@ -27,7 +28,7 @@ use embassy_stm32::peripherals::{AES, PKA, RNG};
 use embassy_stm32::pka::{self, Pka};
 use embassy_stm32::rcc::{
     AHB5Prescaler, AHBPrescaler, APBPrescaler, Hse, HsePrescaler, LsConfig, LseConfig, LseDrive, LseMode, PllDiv,
-    PllMul, PllPreDiv, PllSource, RtcClockSource, Sysclk, VoltageScale, mux,
+    PllMul, PllPreDiv, PllSource, RtcClockSource, Sysclk, VoltageScale,
 };
 use embassy_stm32::rng::{self, Rng};
 use embassy_stm32::time::Hertz;
@@ -37,8 +38,8 @@ use embassy_stm32_wpan::gatt::{CharProperties, GattEventMask, GattServer, Securi
 use embassy_stm32_wpan::{Ble, ble_runner, run_radio_high_isr, run_radio_sw_low_isr};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use panic_probe as _;
 use static_cell::StaticCell;
-use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     RNG => rng::InterruptHandler<RNG>;
@@ -102,9 +103,6 @@ async fn main(spawner: Spawner) {
     config.rcc.ahb5_pre = AHB5Prescaler::DIV4;
     config.rcc.voltage_scale = VoltageScale::RANGE1;
     config.rcc.sys = Sysclk::PLL1_R;
-
-    // Configure RNG clock source to HSI (required for WBA)
-    config.rcc.mux.rngsel = mux::Rngsel::HSI;
 
     let p = embassy_stm32::init(config);
 

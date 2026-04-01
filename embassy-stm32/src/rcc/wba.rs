@@ -85,6 +85,15 @@ pub struct Config {
 
 impl Config {
     pub const fn new() -> Self {
+        // `ClockMux::default()` is mem-zeroed; RM expects explicit kernel clock sources for
+        // RNG (and SAI1 on WBA6) when running from HSI.
+        let mut mux = super::mux::ClockMux::default();
+        mux.rngsel = super::mux::Rngsel::HSI;
+        #[cfg(any(stm32wba62, stm32wba63, stm32wba64, stm32wba65))]
+        {
+            mux.sai1sel = super::mux::Sai1sel::HSI;
+        }
+
         Config {
             hsi: true,
             hse: None,
@@ -98,7 +107,7 @@ impl Config {
             ls: crate::rcc::LsConfig::new(),
             // lsi2: crate::rcc::LsConfig::new(),
             voltage_scale: VoltageScale::RANGE2,
-            mux: super::mux::ClockMux::default(),
+            mux,
         }
     }
 }

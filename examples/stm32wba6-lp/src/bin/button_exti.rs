@@ -36,10 +36,6 @@ async fn main(_spawner: Spawner) {
         lse: None,
     };
 
-    // SAI1 clock mux defaults to PLL1_P — override to HSI since
-    // PLL1 is not configured in this demo.
-    config.rcc.mux.sai1sel = Sai1sel::HSI;
-
     // Disable debug peripherals during STOP to minimise leakage.
     // Set to `true` when debugging with probe-rs / RTT.
     config.enable_debug_during_sleep = false;

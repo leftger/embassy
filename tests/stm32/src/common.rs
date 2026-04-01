@@ -796,19 +796,6 @@ pub fn config() -> Config {
         config.rcc.hsi48 = Some(Hsi48Config { sync_from_usb: true }); // needed for USB
     }
 
-    #[cfg(feature = "stm32wba52cg")]
-    {
-        config.rcc.sys = Sysclk::HSI;
-        config.rcc.mux.rngsel = mux::Rngsel::HSI;
-    }
-
-    #[cfg(feature = "stm32wba65ri")]
-    {
-        config.rcc.sys = Sysclk::HSI;
-        config.rcc.mux.rngsel = mux::Rngsel::HSI;
-        config.rcc.mux.sai1sel = mux::Sai1sel::HSI;
-    }
-
     #[cfg(feature = "stm32l073rz")]
     {
         config.rcc.hsi = true;
