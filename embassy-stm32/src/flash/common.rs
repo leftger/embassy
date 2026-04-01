@@ -52,15 +52,7 @@ impl<'d, MODE> Flash<'d, MODE> {
     /// NOTE: `offset` is an offset from the flash start, NOT an absolute address.
     /// For example, to write address `0x0800_1234` you have to use offset `0x1234`.
     pub fn blocking_write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Error> {
-        unsafe {
-            blocking_write(
-                FLASH_BASE as u32,
-                FLASH_SIZE as u32,
-                offset,
-                bytes,
-                write_chunk_unlocked,
-            )
-        }
+        unsafe { blocking_write(FLASH_BASE as u32, FLASH_SIZE as u32, offset, bytes, false) }
     }
 
     /// Blocking erase.
@@ -87,12 +79,23 @@ pub(super) fn blocking_read(base: u32, size: u32, offset: u32, bytes: &mut [u8])
     Ok(())
 }
 
+/// Blocking flash program.
+///
+/// On most families, `PG` is held for the whole `bytes` slice: one unlock, one programming session,
+/// then all `WRITE_SIZE` chunks via [`family::blocking_write`], then disable + lock. That matches
+/// reference-manual usage and avoids per-chunk register traffic.
+///
+/// STM32H7 / H5 manage `PG` inside each [`family::blocking_write`]; those keep the previous
+/// per-chunk [`write_chunk_unlocked`] path.
+///
+/// When `critical_section` is true (per-region writes), the whole operation runs inside
+/// `critical_section::with` so it matches the old `write_chunk_with_critical_section` behavior.
 pub(super) unsafe fn blocking_write(
     base: u32,
     size: u32,
     offset: u32,
     bytes: &[u8],
-    write_chunk: unsafe fn(u32, &[u8]) -> Result<(), Error>,
+    critical_section: bool,
 ) -> Result<(), Error> {
     if offset + bytes.len() as u32 > size {
         return Err(Error::Size);
@@ -101,22 +104,61 @@ pub(super) unsafe fn blocking_write(
         return Err(Error::Unaligned);
     }
 
-    let mut address = base + offset;
-    trace!(
-        "Writing {} bytes at 0x{:x} (base=0x{:x}, offset=0x{:x})",
-        bytes.len(),
-        address,
-        base,
-        offset
-    );
+    let run = || {
+        let mut address = base + offset;
+        trace!(
+            "Writing {} bytes at 0x{:x} (base=0x{:x}, offset=0x{:x})",
+            bytes.len(),
+            address,
+            base,
+            offset
+        );
 
-    for chunk in bytes.chunks(WRITE_SIZE) {
-        write_chunk(address, chunk)?;
-        address += WRITE_SIZE as u32;
+        #[cfg(any(flash_h7, flash_h7ab, flash_h5))]
+        {
+            for chunk in bytes.chunks(WRITE_SIZE) {
+                write_chunk_unlocked(address, chunk)?;
+                address += WRITE_SIZE as u32;
+            }
+            Ok(())
+        }
+
+        #[cfg(not(any(flash_h7, flash_h7ab, flash_h5)))]
+        {
+            family::clear_all_err();
+            fence(Ordering::SeqCst);
+            family::unlock();
+            fence(Ordering::SeqCst);
+            family::enable_blocking_write();
+            fence(Ordering::SeqCst);
+
+            let mut outcome = Ok(());
+            for chunk in bytes.chunks(WRITE_SIZE) {
+                match family::blocking_write(address, unwrap!(chunk.try_into())) {
+                    Ok(()) => address += WRITE_SIZE as u32,
+                    Err(e) => {
+                        outcome = Err(e);
+                        break;
+                    }
+                }
+            }
+
+            family::disable_blocking_write();
+            fence(Ordering::SeqCst);
+            family::lock();
+
+            outcome
+        }
+    };
+
+    if critical_section {
+        critical_section::with(|_| run())
+    } else {
+        run()
     }
-    Ok(())
 }
 
+#[cfg(any(flash_h7, flash_h7ab, flash_h5))]
 pub(super) unsafe fn write_chunk_unlocked(address: u32, chunk: &[u8]) -> Result<(), Error> {
     family::clear_all_err();
     fence(Ordering::SeqCst);
@@ -132,10 +174,6 @@ pub(super) unsafe fn write_chunk_unlocked(address: u32, chunk: &[u8]) -> Result<
     });
 
     family::blocking_write(address, unwrap!(chunk.try_into()))
-}
-
-pub(super) unsafe fn write_chunk_with_critical_section(address: u32, chunk: &[u8]) -> Result<(), Error> {
-    critical_section::with(|_| write_chunk_unlocked(address, chunk))
 }
 
 pub(super) unsafe fn blocking_erase(
@@ -268,7 +306,7 @@ foreach_flash_region! {
             /// NOTE: `offset` is an offset from the flash start, NOT an absolute address.
             /// For example, to write address `0x0800_1234` you have to use offset `0x1234`.
             pub fn blocking_write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Error> {
-                unsafe { blocking_write(self.0.base(), self.0.size, offset, bytes, write_chunk_with_critical_section) }
+                unsafe { blocking_write(self.0.base(), self.0.size, offset, bytes, true) }
             }
 
             /// Blocking erase.
