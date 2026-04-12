@@ -1,3 +1,5 @@
+use core::marker::PhantomData;
+
 #[cfg(stm32u5)]
 use pac::adc::vals::{Adc4Dmacfg as Dmacfg, Adc4Exten as Exten, Adc4OversamplingRatio as OversamplingRatio};
 #[cfg(stm32wba)]
@@ -14,9 +16,36 @@ pub use crate::pac::adc::vals::{Adc4Presc as Presc, Adc4Res as Resolution, Adc4S
 #[cfg(stm32wba)]
 pub use crate::pac::adc::vals::{Extsel, Presc, Res as Resolution, SampleTime};
 use crate::time::Hertz;
-use crate::{Peri, pac, rcc};
+use crate::{Peri, interrupt, pac, rcc};
+
+mod watchdog_adc4;
+pub use watchdog_adc4::{AnalogWatchdog, WatchdogChannels};
 
 const MAX_ADC_CLK_FREQ: Hertz = Hertz::mhz(55);
+
+/// Interrupt handler.
+pub struct InterruptHandler<T: Instance<Regs = crate::pac::adc::Adc4>> {
+    _phantom: PhantomData<T>,
+}
+
+impl<T: Instance<Regs = crate::pac::adc::Adc4>> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandler<T> {
+    unsafe fn on_interrupt() {
+        let isr = T::regs().isr().read();
+        let ier = T::regs().ier().read();
+
+        if ier.eocie() && isr.eoc() {
+            T::regs().ier().modify(|w| w.set_eocie(false));
+        } else if ier.eosie() && isr.eos() {
+            T::regs().ier().modify(|w| w.set_eosie(false));
+        } else if ier.awdie(0) && isr.awd(0) {
+            T::regs().ier().modify(|w| w.set_awdie(0, false));
+        } else {
+            return;
+        }
+
+        T::state().waker.wake();
+    }
+}
 
 /// Default VREF voltage used for sample conversion to millivolts.
 pub const VREF_DEFAULT_MV: u32 = 3300;
@@ -451,5 +480,11 @@ impl<'d, T: Instance<Regs = crate::pac::adc::Adc4>> super::Adc<'d, T> {
             w.set_ovss(right_shift);
             w.set_ovse(enable)
         })
+    }
+
+    /// Initialize the analog watchdog.
+    pub fn init_watchdog(&mut self, channels: WatchdogChannels, low_threshold: u16, high_threshold: u16) -> AnalogWatchdog<'_, 'd, T> {
+        AnalogWatchdog::<T>::setup_awd(channels, low_threshold, high_threshold);
+        AnalogWatchdog::new(self)
     }
 }
