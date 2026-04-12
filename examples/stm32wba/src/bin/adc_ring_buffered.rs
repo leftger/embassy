@@ -19,8 +19,8 @@
 use defmt::*;
 use defmt_rtt as _;
 use embassy_stm32::adc::adc4::Calibration;
-use embassy_stm32::adc::{Adc, AdcChannel, CONTINUOUS, RingBufferedAdc, adc4};
-use embassy_stm32::peripherals::{ADC4, GPDMA1_CH1};
+use embassy_stm32::adc::{Adc, AdcChannel, RingBufferedAdc, adc4};
+use embassy_stm32::peripherals::GPDMA1_CH1;
 use embassy_stm32::rcc::{
     AHB5Prescaler, AHBPrescaler, APBPrescaler, PllDiv, PllMul, PllPreDiv, PllSource, Sysclk, VoltageScale,
 };
@@ -97,7 +97,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
     // Create the ring-buffered ADC with continuous mode
     // Channels must be in ascending order for ADC4
     // CYCLES12_5 + Samples128 averaging = 5000 samples/sec per channel
-    let mut ring_adc: RingBufferedAdc<ADC4> = adc.into_ring_buffered(
+    let mut ring_adc: RingBufferedAdc<_> = adc.into_ring_buffered(
         p.GPDMA1_CH1,
         unsafe { &mut *core::ptr::addr_of_mut!(DMA_BUF) },
         Irqs,
@@ -107,7 +107,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
             (temp_ch, adc4::SampleTime::CYCLES12_5),    // Channel 13
         ]
         .into_iter(),
-        CONTINUOUS,
+        None,
     );
 
     info!("Ring buffer configured, starting continuous sampling...");

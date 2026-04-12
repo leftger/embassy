@@ -32,7 +32,7 @@ async fn main(_spawner: Spawner) {
     let mut dma = p.DMA1_CH1;
     let mut read_buffer: [u16; 3] = [0; 3];
 
-    loop {
+    for _ in 0..5 {
         info!("============================");
         let blocking_temp = adc.blocking_read(&mut temp, SampleTime::CYCLES12_5);
         let blocking_vref = adc.blocking_read(&mut vref, SampleTime::CYCLES12_5);
@@ -47,14 +47,22 @@ async fn main(_spawner: Spawner) {
             (&mut temp, SampleTime::CYCLES12_5),
             (&mut pin0, SampleTime::CYCLES12_5),
         ];
-        adc.read(dma.reborrow(), Irqs, channels_sequence.into_iter(), &mut read_buffer)
-            .await;
+        adc.read(
+            dma.reborrow(),
+            Irqs,
+            channels_sequence.into_iter(),
+            None,
+            &mut read_buffer,
+        )
+        .await;
         // Values are ordered according to hardware ADC channel number!
         info!(
             "DMA ADC read in set: vref = {}, temp = {}, pin0 = {}.",
             read_buffer[0], read_buffer[1], read_buffer[2]
         );
 
-        Timer::after_millis(2000).await;
+        Timer::after_millis(500).await;
     }
+
+    cortex_m::asm::bkpt();
 }

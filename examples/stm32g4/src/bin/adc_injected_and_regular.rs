@@ -9,9 +9,11 @@
 use core::cell::RefCell;
 
 use defmt::info;
-use embassy_stm32::adc::{Adc, AdcChannel as _, Exten, InjectedAdc, SampleTime, VrefInt};
+use embassy_stm32::adc::{
+    Adc, AdcChannel as _, Exten, InjectedAdc, InjectedAdcTrigger, RegularAdcTrigger, SampleTime, VrefInt,
+};
 use embassy_stm32::interrupt::typelevel::{ADC1_2, Interrupt};
-use embassy_stm32::peripherals::ADC1;
+use embassy_stm32::pac::adc::Adc as AdcRegs;
 use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::complementary_pwm::{ComplementaryPwm, Mms2};
 use embassy_stm32::timer::low_level::CountingMode;
@@ -21,7 +23,7 @@ use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
-static ADC1_HANDLE: CriticalSectionMutex<RefCell<Option<InjectedAdc<ADC1, 1>>>> =
+static ADC1_HANDLE: CriticalSectionMutex<RefCell<Option<InjectedAdc<AdcRegs>>>> =
     CriticalSectionMutex::new(RefCell::new(None));
 
 bind_interrupts!(struct Irqs {
@@ -76,7 +78,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
     pwm.set_mms2(Mms2::UPDATE);
 
     // Configure regular conversions with DMA
-    let adc1 = Adc::new(p.ADC1, Default::default());
+    let mut adc1 = Adc::new(p.ADC1, Default::default());
 
     let vrefint = adc1.enable_vrefint();
 
@@ -107,11 +109,9 @@ async fn main(_spawner: embassy_executor::Spawner) {
         &mut readings,
         Irqs,
         regular_sequence,
-        TIM1_TRGO2,
-        Exten::RISING_EDGE,
+        RegularAdcTrigger::from(TIM1_TRGO2, Exten::RISING_EDGE),
         injected_sequence,
-        TIM1_TRGO2,
-        Exten::RISING_EDGE,
+        InjectedAdcTrigger::from(TIM1_TRGO2, Exten::RISING_EDGE),
         true,
     );
 
@@ -147,7 +147,8 @@ async fn main(_spawner: embassy_executor::Spawner) {
 unsafe fn ADC1_2() {
     critical_section::with(|cs| {
         if let Some(injected_adc) = ADC1_HANDLE.borrow(cs).borrow_mut().as_mut() {
-            let injected_data = injected_adc.read_injected_samples();
+            let mut injected_data = [0u16; 1];
+            injected_adc.read_injected_samples(&mut injected_data);
             info!("Injected reading of PA2: {}", injected_data[0]);
         }
     });

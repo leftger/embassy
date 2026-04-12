@@ -253,7 +253,7 @@ impl<'d, M: PeriMode, CM: CommunicationMode> Spi<'d, M, CM> {
         let cpol = config.raw_polarity();
         let lsbfirst = config.raw_byte_order();
 
-        self.info.rcc.enable_and_reset_without_stop();
+        self.info.rcc.enable_and_reset();
 
         /*
         - Software NSS management (SSM = 1)
@@ -1192,7 +1192,7 @@ impl<'d, CM: CommunicationMode> Spi<'d, Async, CM> {
 
 impl<'d, M: PeriMode, CM: CommunicationMode> Drop for Spi<'d, M, CM> {
     fn drop(&mut self) {
-        self.info.rcc.disable_without_stop();
+        self.info.rcc.disable();
     }
 }
 
@@ -1607,6 +1607,7 @@ impl State {
 
 peri_trait!();
 
+pin_trait!(SdExtPin, Instance);
 pin_trait!(SckPin, Instance, @A);
 pin_trait!(MosiPin, Instance, @A);
 pin_trait!(MisoPin, Instance, @A);
@@ -1617,6 +1618,7 @@ pin_trait!(WsPin, Instance, @A);
 pin_trait!(I2sSdPin, Instance, @A);
 dma_trait!(RxDma, Instance);
 dma_trait!(TxDma, Instance);
+dma_trait!(RxDmaExt, Instance);
 
 foreach_peripheral!(
     (spi, $inst:ident) => {

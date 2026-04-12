@@ -13,7 +13,7 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::adc::{Adc, AdcChannel as _, Resolution, SampleTime};
+use embassy_stm32::adc::{Adc, AdcChannel as _, RegularAdcTrigger, Resolution, SampleTime};
 use embassy_stm32::pac::adc::vals::Exten;
 use embassy_stm32::peripherals::DMA1_CH1;
 use embassy_stm32::time::Hertz;
@@ -55,7 +55,7 @@ async fn main(_spawner: Spawner) {
     pwm.set_mms2(Mms2::UPDATE);
 
     // Configure ADC with DMA ring buffer
-    let adc = Adc::new(p.ADC1, Resolution::BITS12);
+    let mut adc = Adc::new(p.ADC1, Resolution::BITS12);
 
     // Setup channels to measure
     let mut vrefint = adc.enable_vrefint();
@@ -82,8 +82,7 @@ async fn main(_spawner: Spawner) {
         &mut dma_buf,
         Irqs,
         sequence,
-        TIM1_TRGO2,         // Timer 1 TRGO2 as trigger source
-        Exten::RISING_EDGE, // Trigger on rising edge (can also use FALLING_EDGE or BOTH_EDGES)
+        RegularAdcTrigger::from(TIM1_TRGO2, Exten::RISING_EDGE), // Timer 1 TRGO2 as trigger source and trigger on rising edge (can also use FALLING_EDGE or BOTH_EDGES)
     );
 
     // Start ADC conversions and DMA transfer

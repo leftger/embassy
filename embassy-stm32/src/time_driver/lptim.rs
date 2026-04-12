@@ -61,7 +61,7 @@ impl RtcDriver {
         let r = regs_lptim();
 
         // we want this to increment the stop mode counter (some lp timer can't do STOP2)
-        rcc::enable_and_reset_without_stop::<T>();
+        rcc::enable_and_reset::<T>();
 
         let timer_freq = T::frequency();
 
@@ -270,11 +270,6 @@ impl super::LPTimeDriver for RtcDriver {
     fn resume_time(&self, _cs: CriticalSection) {
         trace!("resume_time");
         self.is_stopped.store(false, Ordering::Relaxed);
-    }
-
-    /// Returns whether time is currently "stopped"
-    fn is_stopped(&self) -> bool {
-        self.is_stopped.load(Ordering::Relaxed)
     }
 }
 

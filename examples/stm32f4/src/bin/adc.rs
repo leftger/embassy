@@ -5,7 +5,7 @@ use cortex_m::prelude::_embedded_hal_blocking_delay_DelayUs;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::adc::vals::Exten;
-use embassy_stm32::adc::{Adc, AdcChannel, SampleTime, Temperature, VrefInt};
+use embassy_stm32::adc::{Adc, AdcChannel, RegularAdcTrigger, SampleTime, Temperature, VrefInt};
 use embassy_stm32::triggers::TIM1_CH1;
 use embassy_stm32::{bind_interrupts, dma, peripherals};
 use embassy_time::{Delay, Timer};
@@ -13,6 +13,7 @@ use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     DMA2_STREAM2 => dma::InterruptHandler<peripherals::DMA2_CH2>;
+    DMA2_STREAM0 => dma::InterruptHandler<peripherals::DMA2_CH0>;
 });
 
 #[embassy_executor::main]
@@ -28,8 +29,7 @@ async fn main(_spawner: Spawner) {
         &mut adc_dma_buf,
         Irqs,
         [(p.PA0.degrade_adc(), SampleTime::CYCLES112)].into_iter(),
-        TIM1_CH1,
-        Exten::RISING_EDGE,
+        RegularAdcTrigger::from(TIM1_CH1, Exten::RISING_EDGE),
     );
     adc_ring_buffered.start();
 
@@ -42,6 +42,26 @@ async fn main(_spawner: Spawner) {
 
     // Startup delay can be combined to the maximum of either
     delay.delay_us(Temperature::start_time_us().max(VrefInt::start_time_us()));
+
+    {
+        let mut first_pin = p.PA0.degrade_adc();
+        let mut second_pin = p.PA2.degrade_adc();
+
+        let mut configured_sequence = adc.configured_sequence(
+            p.DMA2_CH0,
+            [
+                (&mut first_pin, SampleTime::CYCLES112),
+                (&mut second_pin, SampleTime::CYCLES112),
+            ]
+            .into_iter(),
+            Irqs,
+        );
+
+        let mut buf = [0u16; 4];
+
+        configured_sequence.read(&mut buf[..2]).await;
+        configured_sequence.read(&mut buf[2..]).await;
+    }
 
     let vrefint_sample = adc.blocking_read(&mut vrefint, SampleTime::CYCLES112);
 

@@ -1,3 +1,5 @@
+//! STM32H747I-DISCO Display example using DSI in adapted command mode
+
 #![no_std]
 #![no_main]
 
@@ -11,6 +13,7 @@ use embassy_stm32::dsihost::{
     DsiTearEventSource,
 };
 use embassy_stm32::fmc::Fmc;
+use embassy_stm32::gpio::Output;
 use embassy_stm32::ltdc::{self, Ltdc, LtdcLayer, LtdcLayerConfig, PixelFormat, PolarityActive};
 use embassy_stm32::rcc::{DsiHostPllConfig, DsiPllInput, DsiPllOutput, Hse, Pll};
 use embassy_stm32::time::Hertz;
@@ -18,6 +21,7 @@ use embassy_stm32::{Config, SharedData, bind_interrupts, peripherals};
 use embassy_stm32h755cm7_examples::glass::Glass;
 use embassy_stm32h755cm7_examples::init_sdram;
 use embassy_stm32h755cm7_examples::ui::Tui;
+use embassy_time::Timer;
 use mousefood::embedded_graphics::prelude::{DrawTarget, RgbColor};
 use mousefood::{EmbeddedBackend, EmbeddedBackendConfig};
 use ratatui::Terminal;
@@ -161,6 +165,11 @@ async fn main(_spawner: Spawner) {
     let cp = cortex_m::Peripherals::take().unwrap();
     let mut buffers = init_sdram(cp, sdram);
 
+    // Reset display
+    let mut dsi_reset = Output::new(p.PG3, embassy_stm32::gpio::Level::Low, embassy_stm32::gpio::Speed::Low);
+    Timer::after_millis(120).await;
+    dsi_reset.set_high();
+
     // Create DSI host using PJ2 as tearing input
     let mut dsi = DsiHost::new(p.DSIHOST, p.PJ2);
     let mut ltdc = Ltdc::new(p.LTDC);
@@ -192,7 +201,6 @@ async fn main(_spawner: Spawner) {
     let dsi_phy_config = DsiHostPhyConfig {
         lanes: DsiHostPhyLanes::Two,
         stop_wait_time: 10,
-        tx_escape_div: 3,
         acr: false,
         crc_rx: false,
         ecc_rx: false,
