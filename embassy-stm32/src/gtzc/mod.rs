@@ -2,6 +2,8 @@
 //!
 //! This module provides a way to configure the GTZC (TZSC, MPCBB, TZIC) on STM32WBA65 cores.
 
+use cortex_m::peripheral::NVIC;
+
 use crate::pac;
 
 /// GTZC peripheral identifier for TZSC.
@@ -74,8 +76,9 @@ pub enum SramBlock {
 ///
 /// This function allows assigning peripherals and SRAM blocks to Secure or Non-Secure domains.
 pub unsafe fn init() {
-    // Enable GTZC clock via RCC if needed
-    // On WBA65, GTZC clock is usually enabled by default or via RCC_AHB2ENR.GTZCEN
+    // Enable GTZC clock via RCC.
+    // On WBA65, GTZC clock is enabled via RCC_AHB2ENR.GTZC1EN (bit 24).
+    pac::RCC.ahb2enr().modify(|w| w.set_gtzc1en(true));
 }
 
 /// Assign a peripheral to the Secure or Non-Secure domain.
@@ -165,6 +168,6 @@ pub unsafe fn enable_tzic() {
         });
     }
 
-    // Unpend and enable GTZC IRQ in NVIC
-    // Note: The IRQ name might vary (e.g., GTZC_IRQn)
+    // Enable GTZC IRQ in NVIC
+    NVIC::unmask(pac::Interrupt::GTZC);
 }

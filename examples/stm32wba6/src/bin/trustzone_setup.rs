@@ -48,6 +48,8 @@ async fn main(_spawner: Spawner) {
     // 2. Configure the GTZC (Global TrustZone Controller)
     // Assign peripherals and memory blocks to the Non-Secure domain.
     unsafe {
+        embassy_stm32::gtzc::init();
+
         // Assign USART1 to Non-Secure so the NS application can use it for logging
         embassy_stm32::gtzc::set_peripheral_secure(Peripheral::Usart1, false);
         info!("USART1 assigned to Non-Secure");
