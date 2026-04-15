@@ -64,9 +64,15 @@ async fn main(_spawner: Spawner) {
     }
 
     info!("TrustZone configuration complete.");
-    info!("In a real scenario, we would now jump to the Non-Secure application.");
+    info!("Jumping to Non-Secure application at 0x0808_0000...");
 
-    loop {
+    // 3. Jump to the Non-Secure application
+    // This assumes that a valid Non-Secure application vector table is located at 0x0808_0000.
+    // In a real development scenario, you would have a separate project for the Non-Secure side.
+    unsafe {
+        // Wait a bit to ensure logs are flushed
         embassy_time::Timer::after_secs(1).await;
+
+        embassy_stm32::boot::jump_to_non_secure(0x0808_0000);
     }
 }

@@ -122,6 +122,8 @@ pub mod lcd;
 pub mod gtzc;
 #[cfg(feature = "trustzone-secure")]
 pub mod sau;
+#[cfg(feature = "trustzone-secure")]
+pub mod boot;
 #[cfg(feature = "low-power")]
 pub mod low_power;
 #[cfg(lptim)]
