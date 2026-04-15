@@ -118,6 +118,10 @@ pub mod i2s;
 pub mod ipcc;
 #[cfg(lcd)]
 pub mod lcd;
+#[cfg(feature = "trustzone-secure")]
+pub mod gtzc;
+#[cfg(feature = "trustzone-secure")]
+pub mod sau;
 #[cfg(feature = "low-power")]
 pub mod low_power;
 #[cfg(lptim)]
