@@ -41,7 +41,7 @@ async fn main(_spawner: Spawner) {
     info!("stm32n6 neochrom example starting");
 
     let mut gpu = NeoChrom::new().expect("NeoChrom init failed");
-    let mut fb = FrameBuffer::<FB_WIDTH, FB_HEIGHT, FB_PIXELS>::new();
+    let fb = FrameBuffer::<FB_WIDTH, FB_HEIGHT, FB_PIXELS>::new();
 
     let colors = [
         Rgba8888::RED,
