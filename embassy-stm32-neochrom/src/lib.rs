@@ -1,0 +1,24 @@
+//! NeoChrom (GPU2D) support for STM32 MCUs via NemaGFX.
+//!
+//! This crate wraps the [`stm32-bindings`](https://github.com/embassy-rs/stm32-bindings)
+//! NemaGFX FFI with a small safe-ish driver surface. Platform register access and
+//! memory allocation are provided by [`nema-gfx-hal`](https://github.com/embassy-rs/stm32-bindings/tree/main/nema-gfx-hal)
+//! until `embassy-stm32`'s GPU2D driver grows HAL hooks for N6/H7RS.
+
+#![no_std]
+#![warn(missing_docs)]
+#![allow(unsafe_op_in_unsafe_fn)]
+
+pub(crate) mod fmt;
+
+mod color;
+mod driver;
+mod error;
+mod framebuffer;
+
+pub mod ffi;
+
+pub use color::Rgba8888;
+pub use driver::NeoChrom;
+pub use error::{Error, InitError};
+pub use framebuffer::FrameBuffer;
