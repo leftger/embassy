@@ -15,6 +15,8 @@ mod color;
 mod driver;
 mod error;
 mod framebuffer;
+#[cfg(not(feature = "stub-gpu2d"))]
+mod gpu2d_bridge;
 
 pub mod ffi;
 

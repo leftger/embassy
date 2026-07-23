@@ -17,10 +17,33 @@ pub struct NeoChrom {
 }
 
 impl NeoChrom {
-    /// Initialize NemaGFX and the platform HAL.
+    /// Initialize NemaGFX and the platform HAL using the in-tree GPU2D stub.
+    ///
+    /// Only available with the default `stub-gpu2d` feature (CI / link tests).
+    #[cfg(feature = "stub-gpu2d")]
     pub fn new() -> Result<Self, InitError> {
-        Self::init_gpu2d()?;
+        nema_gfx_hal::gpu2d_init_stub().map_err(|_| InitError::Gpu2d)?;
+        Self::finish_init()
+    }
 
+    /// Initialize NemaGFX using the real GPU2D peripheral.
+    ///
+    /// `peri`/`irq` are consumed to enable the GPU2D peripheral clock and
+    /// interrupt via [`embassy_stm32::gpu2d::Gpu2d`]. Only available without
+    /// the default `stub-gpu2d` feature.
+    #[cfg(not(feature = "stub-gpu2d"))]
+    pub fn new(
+        peri: embassy_stm32::Peri<'static, embassy_stm32::peripherals::GPU2D>,
+        irq: impl embassy_stm32::interrupt::typelevel::Binding<
+            <embassy_stm32::peripherals::GPU2D as embassy_stm32::gpu2d::Instance>::Interrupt,
+            embassy_stm32::gpu2d::InterruptHandler<embassy_stm32::peripherals::GPU2D>,
+        > + 'static,
+    ) -> Result<Self, InitError> {
+        crate::gpu2d_bridge::init(peri, irq);
+        Self::finish_init()
+    }
+
+    fn finish_init() -> Result<Self, InitError> {
         let status = unsafe { nema_init() };
         if status != 0 {
             return Err(InitError::NemaGfx);
@@ -48,17 +71,5 @@ impl NeoChrom {
         }
 
         Ok(())
-    }
-
-    fn init_gpu2d() -> Result<(), InitError> {
-        #[cfg(feature = "stub-gpu2d")]
-        {
-            nema_gfx_hal::gpu2d_init_stub().map_err(|_| InitError::Gpu2d)
-        }
-        #[cfg(not(feature = "stub-gpu2d"))]
-        {
-            // Real GPU2D init must happen in board support before `NeoChrom::new`.
-            Ok(())
-        }
     }
 }
