@@ -9,6 +9,8 @@
 #![warn(missing_docs)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+pub use nema_gfx_hal;
+
 pub(crate) mod fmt;
 
 mod color;

@@ -60,19 +60,17 @@ pub fn init(peri: Peri<'static, GPU2D>, irq: impl Binding<<GPU2D as Gpu2dInstanc
 /// # Safety
 /// Called only by `nema-gfx-hal`'s C code with `&hgpu2d`.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn HAL_GPU2D_ReadRegister(_handle: *mut Gpu2dHandleTypeDef, _reg: u32) -> u32 {
-    // Only command-list-complete/error status is bridged today (see
-    // `HAL_GPU2D_PollCompletion`); no known nema-gfx-hal code path reads an
-    // arbitrary register through this hook. Extend if that changes.
-    0
+unsafe extern "C" fn HAL_GPU2D_ReadRegister(_handle: *mut Gpu2dHandleTypeDef, reg: u32) -> u32 {
+    let base = embassy_stm32::pac::GPU2D.as_ptr() as *const u8;
+    unsafe { core::ptr::read_volatile(base.add(reg as usize) as *const u32) }
 }
 
 /// # Safety
 /// Called only by `nema-gfx-hal`'s C code with `&hgpu2d`.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn HAL_GPU2D_WriteRegister(_handle: *mut Gpu2dHandleTypeDef, _reg: u32, _value: u32) {
-    // No known nema-gfx-hal code path writes an arbitrary register through
-    // this hook today. Extend if that changes.
+unsafe extern "C" fn HAL_GPU2D_WriteRegister(_handle: *mut Gpu2dHandleTypeDef, reg: u32, value: u32) {
+    let base = embassy_stm32::pac::GPU2D.as_ptr() as *mut u8;
+    unsafe { core::ptr::write_volatile(base.add(reg as usize) as *mut u32, value) }
 }
 
 /// # Safety

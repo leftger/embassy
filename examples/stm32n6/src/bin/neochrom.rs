@@ -21,6 +21,8 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_stm32::rcc::SupplyConfig;
 use embassy_stm32::{Config, pac};
+#[cfg(not(feature = "stub-gpu2d"))]
+use embassy_stm32::{bind_interrupts, gpu2d, peripherals};
 use embassy_stm32_neochrom::{FrameBuffer, NeoChrom, Rgba8888};
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
@@ -29,18 +31,29 @@ const FB_WIDTH: u32 = 64;
 const FB_HEIGHT: u32 = 64;
 const FB_PIXELS: usize = (FB_WIDTH * FB_HEIGHT) as usize;
 
+#[cfg(not(feature = "stub-gpu2d"))]
+bind_interrupts!(struct Irqs {
+    GPU2D_ER => gpu2d::InterruptHandler<peripherals::GPU2D>;
+});
+
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let mut config = Config::default();
     // DK uses external SMPS (UM3300 Tab.6); embassy default = internal SMPS hangs init() at VOSRDY.
     config.rcc.supply_config = SupplyConfig::External;
-    let _p = embassy_stm32::init(config);
+    let p = embassy_stm32::init(config);
+    #[cfg(feature = "stub-gpu2d")]
+    let _ = p;
 
     enable_all_sram();
 
     info!("stm32n6 neochrom example starting");
 
+    #[cfg(feature = "stub-gpu2d")]
     let mut gpu = NeoChrom::new().expect("NeoChrom init failed");
+
+    #[cfg(not(feature = "stub-gpu2d"))]
+    let mut gpu = NeoChrom::new(p.GPU2D, Irqs).expect("NeoChrom init failed");
     let fb = FrameBuffer::<FB_WIDTH, FB_HEIGHT, FB_PIXELS>::new();
 
     let colors = [
