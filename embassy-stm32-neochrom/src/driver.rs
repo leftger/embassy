@@ -174,4 +174,142 @@ impl NeoChrom {
 
         Ok(())
     }
+
+    /// Fill a rounded rectangle with corner radius `r` using the GPU.
+    pub fn fill_rounded_rect<const W: u32, const H: u32, const N: usize>(
+        &mut self,
+        framebuffer: &FrameBuffer<W, H, N>,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        r: i32,
+        color: Rgba8888,
+    ) -> Result<(), Error> {
+        unsafe {
+            use crate::ffi::nema_gfx::nema_fill_rounded_rect;
+            nema_bind_dst_tex(framebuffer.phys_addr(), W, H, NEMA_RGBA8888, -1);
+
+            let mut cl = nema_cl_create();
+            nema_cl_bind(&mut cl);
+            nema_fill_rounded_rect(x, y, w, h, r, color.bits());
+            nema_cl_submit(&mut cl);
+            if nema_cl_wait(&mut cl) != 0 {
+                return Err(Error::CommandListWait);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Fill a triangle defined by 3 vertices (`x0`,`y0`), (`x1`,`y1`), (`x2`,`y2`) using the GPU.
+    pub fn fill_triangle<const W: u32, const H: u32, const N: usize>(
+        &mut self,
+        framebuffer: &FrameBuffer<W, H, N>,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: Rgba8888,
+    ) -> Result<(), Error> {
+        unsafe {
+            use crate::ffi::nema_gfx::nema_fill_triangle;
+            nema_bind_dst_tex(framebuffer.phys_addr(), W, H, NEMA_RGBA8888, -1);
+
+            let mut cl = nema_cl_create();
+            nema_cl_bind(&mut cl);
+            nema_fill_triangle(x0, y0, x1, y1, x2, y2, color.bits());
+            nema_cl_submit(&mut cl);
+            if nema_cl_wait(&mut cl) != 0 {
+                return Err(Error::CommandListWait);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Fill a quadrilateral defined by 4 vertices using the GPU.
+    pub fn fill_quad<const W: u32, const H: u32, const N: usize>(
+        &mut self,
+        framebuffer: &FrameBuffer<W, H, N>,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        x3: i32,
+        y3: i32,
+        color: Rgba8888,
+    ) -> Result<(), Error> {
+        unsafe {
+            use crate::ffi::nema_gfx::nema_fill_quad;
+            nema_bind_dst_tex(framebuffer.phys_addr(), W, H, NEMA_RGBA8888, -1);
+
+            let mut cl = nema_cl_create();
+            nema_cl_bind(&mut cl);
+            nema_fill_quad(x0, y0, x1, y1, x2, y2, x3, y3, color.bits());
+            nema_cl_submit(&mut cl);
+            if nema_cl_wait(&mut cl) != 0 {
+                return Err(Error::CommandListWait);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Blit source texture `src` to `dst` at (`dst_x`, `dst_y`) scaled to `dst_w` x `dst_h`.
+    pub fn blit_rect_fit<const DW: u32, const DH: u32, const DN: usize, const SW: u32, const SH: u32, const SN: usize>(
+        &mut self,
+        dst: &FrameBuffer<DW, DH, DN>,
+        src: &FrameBuffer<SW, SH, SN>,
+        dst_x: i32,
+        dst_y: i32,
+        dst_w: i32,
+        dst_h: i32,
+    ) -> Result<(), Error> {
+        unsafe {
+            use crate::ffi::nema_gfx::{nema_bind_src_tex, nema_blit_rect_fit, NEMA_TEX_BORDER};
+            nema_bind_dst_tex(dst.phys_addr(), DW, DH, NEMA_RGBA8888, -1);
+            nema_bind_src_tex(src.phys_addr(), SW, SH, NEMA_RGBA8888, -1, NEMA_TEX_BORDER as u8);
+
+            let mut cl = nema_cl_create();
+            nema_cl_bind(&mut cl);
+            nema_blit_rect_fit(dst_x, dst_y, dst_w, dst_h);
+            nema_cl_submit(&mut cl);
+            if nema_cl_wait(&mut cl) != 0 {
+                return Err(Error::CommandListWait);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Blit source texture `src` to `dst` at (`dst_x`, `dst_y`) with rotation `angle_degrees`.
+    pub fn blit_rotate<const DW: u32, const DH: u32, const DN: usize, const SW: u32, const SH: u32, const SN: usize>(
+        &mut self,
+        dst: &FrameBuffer<DW, DH, DN>,
+        src: &FrameBuffer<SW, SH, SN>,
+        dst_x: i32,
+        dst_y: i32,
+        angle_degrees: u32,
+    ) -> Result<(), Error> {
+        unsafe {
+            use crate::ffi::nema_gfx::{nema_bind_src_tex, nema_blit_rotate, NEMA_TEX_BORDER};
+            nema_bind_dst_tex(dst.phys_addr(), DW, DH, NEMA_RGBA8888, -1);
+            nema_bind_src_tex(src.phys_addr(), SW, SH, NEMA_RGBA8888, -1, NEMA_TEX_BORDER as u8);
+
+            let mut cl = nema_cl_create();
+            nema_cl_bind(&mut cl);
+            nema_blit_rotate(dst_x, dst_y, angle_degrees);
+            nema_cl_submit(&mut cl);
+            if nema_cl_wait(&mut cl) != 0 {
+                return Err(Error::CommandListWait);
+            }
+        }
+
+        Ok(())
+    }
 }
