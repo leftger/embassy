@@ -46,6 +46,7 @@ async fn main(_spawner: Spawner) {
     let _ = p;
 
     enable_all_sram();
+    promote_gpu2d_master_attributes();
 
     info!("stm32n6 neochrom example starting");
 
@@ -87,4 +88,11 @@ fn enable_all_sram() {
         w.set_ahbsram2en(true);
         w.set_bkpsramen(true);
     });
+}
+
+/// Promote GPU2D AXI master attributes so the RISAF default region accepts hardware DMA reads and writes.
+fn promote_gpu2d_master_attributes() {
+    use embassy_stm32::rif::{RifMaster, RifMasterAttributes, RifPeripheral, RifPeripheralAttributes};
+    RifMaster::Gpu2d.set_attributes(&RifMasterAttributes::new(1, true, true));
+    RifPeripheral::Gpu2d.set_attributes(&RifPeripheralAttributes::new(true, true));
 }
