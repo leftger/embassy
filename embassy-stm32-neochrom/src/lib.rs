@@ -21,8 +21,12 @@ mod framebuffer;
 mod gpu2d_bridge;
 
 pub mod ffi;
+#[cfg(feature = "embedded-graphics")]
+pub mod target;
 
-pub use color::Rgba8888;
-pub use driver::NeoChrom;
+pub use color::{ColorFormat, Rgba8888};
+pub use driver::{BlendMode, NeoChrom, TextureFilter, TextureWrap};
 pub use error::{Error, InitError};
 pub use framebuffer::FrameBuffer;
+#[cfg(feature = "embedded-graphics")]
+pub use target::NeoChromTarget;

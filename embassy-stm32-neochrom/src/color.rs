@@ -28,3 +28,20 @@ impl Rgba8888 {
         self.0
     }
 }
+
+/// NemaGFX texture color formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(u32)]
+pub enum ColorFormat {
+    /// 32-bit RGBA8888 (4 bytes per pixel).
+    Rgba8888 = 0,
+    /// 16-bit RGB565 (2 bytes per pixel).
+    Rgb565 = 4,
+    /// 16-bit RGBA4444 (2 bytes per pixel).
+    Rgba4444 = 5,
+    /// 8-bit Alpha mask (1 byte per pixel).
+    A8 = 8,
+    /// 8-bit Grayscale (1 byte per pixel).
+    L8 = 11,
+}
