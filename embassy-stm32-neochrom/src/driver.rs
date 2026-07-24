@@ -161,7 +161,7 @@ impl NeoChrom {
         unsafe {
             use crate::ffi::nema_gfx::{nema_bind_src_tex, nema_blit, NEMA_TEX_BORDER};
             nema_bind_dst_tex(dst.phys_addr(), DW, DH, NEMA_RGBA8888, -1);
-            nema_bind_src_tex(src.phys_addr(), SW, SH, NEMA_RGBA8888, -1, NEMA_TEX_BORDER);
+            nema_bind_src_tex(src.phys_addr(), SW, SH, NEMA_RGBA8888, -1, NEMA_TEX_BORDER as u8);
 
             let mut cl = nema_cl_create();
             nema_cl_bind(&mut cl);
