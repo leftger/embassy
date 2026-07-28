@@ -88,18 +88,18 @@ async fn main(_spawner: embassy_executor::Spawner) {
         unsafe { &mut *core::ptr::addr_of_mut!(DMA_BUF) },
         Irqs,
         [
-            (vrefint.reborrow_adc(), adc4::SampleTime::Cycles795), // ch 0
-            (pa8.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 1
-            (pa7.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 2
-            (pa6.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 3
-            (pa5.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 4
-            (pa4.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 5
-            (pa3.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 6
-            (pa2.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 7
-            (pa1.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 8
-            (pa0.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 9
-            (pb9.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 10
-            (vcore.reborrow_adc(), adc4::SampleTime::Cycles795),   // ch 12
+            (vrefint.reborrow_adc(), adc4::SampleTime::Cycles795),     // ch 0
+            (pa8.reborrow_adc(), adc4::SampleTime::Cycles795),         // ch 1
+            (pa7.reborrow_adc(), adc4::SampleTime::Cycles795),         // ch 2
+            (pa6.reborrow_adc(), adc4::SampleTime::Cycles795),         // ch 3
+            (pa5.reborrow_adc(), adc4::SampleTime::Cycles795),         // ch 4
+            (pa4.reborrow_adc(), adc4::SampleTime::Cycles795),         // ch 5
+            (pa3.reborrow_adc(), adc4::SampleTime::Cycles795),         // ch 6
+            (pa2.reborrow_adc(), adc4::SampleTime::Cycles795),         // ch 7
+            (pa1.reborrow_adc(), adc4::SampleTime::Cycles795),         // ch 8
+            (pa0.reborrow_adc(), adc4::SampleTime::Cycles795),         // ch 9
+            (pb9.reborrow_adc(), adc4::SampleTime::Cycles795),         // ch 10
+            (vcore.reborrow_adc(), adc4::SampleTime::Cycles795),       // ch 12
             (temperature.reborrow_adc(), adc4::SampleTime::Cycles795), // ch 13
         ]
         .into_iter(),
