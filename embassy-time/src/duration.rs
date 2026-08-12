@@ -345,3 +345,70 @@ impl core::iter::Sum for Duration {
         Duration::from_ticks(iter.map(|d| d.as_ticks()).sum())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TICK_HZ;
+
+    #[test]
+    fn from_as_roundtrip() {
+        assert_eq!(Duration::from_secs(3).as_secs(), 3);
+        assert_eq!(Duration::from_millis(1500).as_millis(), 1500);
+        assert_eq!(Duration::from_secs(1).as_ticks(), TICK_HZ);
+    }
+
+    #[test]
+    fn millis_rounds_up_vs_floor() {
+        // At 1MHz, 1ms = 1000 ticks exactly; use a value that needs ceil when TICK_HZ divides oddly.
+        // from_millis uses div_ceil; from_millis_floor truncates.
+        let ceil = Duration::from_millis(1);
+        let floor = Duration::from_millis_floor(1);
+        assert!(ceil.as_ticks() >= floor.as_ticks());
+        assert_eq!(floor.as_millis(), 1);
+    }
+
+    #[test]
+    fn from_hz() {
+        assert_eq!(Duration::from_hz(2).as_ticks(), TICK_HZ / 2);
+        assert_eq!(Duration::from_hz(TICK_HZ).as_ticks(), 1);
+        assert_eq!(Duration::from_hz(TICK_HZ * 2).as_ticks(), 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn from_hz_zero_panics() {
+        let _ = Duration::from_hz(0);
+    }
+
+    #[test]
+    fn try_from_overflow() {
+        assert!(Duration::try_from_secs(u64::MAX).is_none());
+        assert!(Duration::try_from_millis(u64::MAX).is_none());
+        assert_eq!(Duration::try_from_secs(2).unwrap().as_secs(), 2);
+    }
+
+    #[test]
+    fn checked_arith_and_sum() {
+        let a = Duration::from_secs(2);
+        let b = Duration::from_secs(3);
+        assert_eq!(a.checked_add(b).unwrap().as_secs(), 5);
+        assert_eq!(b.checked_sub(a).unwrap().as_secs(), 1);
+        assert_eq!(a.checked_sub(b), None);
+        assert_eq!(a.checked_mul(4).unwrap().as_secs(), 8);
+        assert_eq!(b.checked_div(3).unwrap().as_secs(), 1);
+        assert_eq!(Duration::MAX.checked_add(Duration::from_ticks(1)), None);
+
+        let sum: Duration = [a, b, Duration::from_secs(1)].into_iter().sum();
+        assert_eq!(sum.as_secs(), 6);
+    }
+
+    #[test]
+    fn core_time_convert() {
+        let d = Duration::from_millis(250);
+        let core_d: core::time::Duration = d.into();
+        assert_eq!(core_d.as_millis(), 250);
+        let back = Duration::try_from(core_d).unwrap();
+        assert_eq!(back.as_millis(), 250);
+    }
+}

@@ -267,3 +267,49 @@ impl<'a> fmt::Display for Instant {
         write!(f, "{} ticks", self.ticks)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Duration;
+
+    #[test]
+    fn from_as_secs_millis() {
+        assert_eq!(Instant::from_secs(3).as_secs(), 3);
+        assert_eq!(Instant::from_millis(1500).as_millis(), 1500);
+        assert_eq!(Instant::from_secs(1).as_ticks(), TICK_HZ);
+    }
+
+    #[test]
+    fn ops_with_duration() {
+        let a = Instant::from_secs(5);
+        let b = a + Duration::from_secs(2);
+        assert_eq!(b.as_secs(), 7);
+        assert_eq!((b - Duration::from_secs(3)).as_secs(), 4);
+        assert_eq!(b - a, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn checked_and_saturating_duration_since() {
+        let earlier = Instant::from_secs(1);
+        let later = Instant::from_secs(4);
+        assert_eq!(later.duration_since(earlier), Duration::from_secs(3));
+        assert_eq!(later.checked_duration_since(earlier), Some(Duration::from_secs(3)));
+        assert_eq!(earlier.checked_duration_since(later), None);
+        assert_eq!(earlier.saturating_duration_since(later), Duration::from_ticks(0));
+    }
+
+    #[test]
+    fn checked_saturating_add_sub() {
+        assert_eq!(Instant::MAX.checked_add(Duration::from_ticks(1)), None);
+        assert_eq!(Instant::MAX.saturating_add(Duration::from_ticks(1)), Instant::MAX);
+        assert_eq!(Instant::MIN.checked_sub(Duration::from_ticks(1)), None);
+        assert_eq!(Instant::MIN.saturating_sub(Duration::from_ticks(1)), Instant::MIN);
+    }
+
+    #[test]
+    fn try_from_secs_overflow() {
+        assert!(Instant::try_from_secs(u64::MAX).is_none());
+        assert_eq!(Instant::try_from_secs(1).unwrap().as_secs(), 1);
+    }
+}

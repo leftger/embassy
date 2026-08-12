@@ -356,3 +356,194 @@ fn task_metadata() {
     executor.spawner().spawn(task1(None).unwrap());
     unsafe { executor.poll() };
 }
+
+#[test]
+fn spawn_busy_while_running() {
+    use embassy_executor::SpawnError;
+
+    #[task]
+    async fn hanging(_trace: Trace) {
+        poll_fn(|_| Poll::Pending).await
+    }
+
+    let (executor, trace) = setup();
+    executor.spawner().spawn(hanging(trace.clone()).unwrap());
+    assert!(matches!(hanging(trace.clone()), Err(SpawnError::Busy)));
+    assert!(format!("{}", SpawnError::Busy).contains("Busy"));
+}
+
+#[test]
+#[should_panic(expected = "SpawnToken instances may not be dropped")]
+fn spawn_token_drop_panics() {
+    #[task]
+    async fn task1() {}
+
+    let _token = task1().unwrap();
+}
+
+#[test]
+fn pool_size_exhaustion_and_reuse() {
+    use embassy_executor::SpawnError;
+
+    #[task(pool_size = 2)]
+    async fn hanging(_trace: Trace) {
+        poll_fn(|_| Poll::Pending).await
+    }
+
+    #[task(pool_size = 2)]
+    async fn task2(trace: Trace) {
+        trace.push("task2");
+    }
+
+    let (executor, trace) = setup();
+    executor.spawner().spawn(hanging(trace.clone()).unwrap());
+    executor.spawner().spawn(hanging(trace.clone()).unwrap());
+    assert!(matches!(hanging(trace.clone()), Err(SpawnError::Busy)));
+
+    executor.spawner().spawn(task2(trace.clone()).unwrap());
+    executor.spawner().spawn(task2(trace.clone()).unwrap());
+    assert!(matches!(task2(trace.clone()), Err(SpawnError::Busy)));
+    unsafe { executor.poll() };
+    // After completion, pool slots are free again.
+    executor.spawner().spawn(task2(trace.clone()).unwrap());
+    unsafe { executor.poll() };
+
+    let got = trace.get();
+    assert_eq!(got.iter().filter(|&&s| s == "task2").count(), 3);
+    assert!(got.contains(&"pend"));
+}
+
+#[test]
+fn executor_id_stable_and_distinct() {
+    let (executor1, _) = setup();
+    let (executor2, _) = setup();
+
+    assert_eq!(executor1.id(), executor1.spawner().executor_id());
+    assert_eq!(executor2.id(), executor2.spawner().executor_id());
+    assert_ne!(executor1.id(), executor2.id());
+}
+
+#[test]
+fn send_spawner_roundtrip() {
+    #[task]
+    async fn task1(trace: Trace) {
+        trace.push("poll task1")
+    }
+
+    let (executor, trace) = setup();
+    executor.spawner().make_send().spawn(task1(trace.clone()).unwrap());
+
+    unsafe { executor.poll() };
+
+    assert_eq!(trace.get(), &["pend", "poll task1",]);
+}
+
+#[test]
+fn for_current_executor_spawns_sibling() {
+    #[task(pool_size = 2)]
+    async fn task1(trace: Trace, spawn_child: bool) {
+        trace.push(if spawn_child { "parent" } else { "child" });
+        if spawn_child {
+            let spawner = embassy_executor::SendSpawner::for_current_executor().await;
+            spawner.spawn(task1(trace, false).unwrap());
+        }
+    }
+
+    let (executor, trace) = setup();
+    executor.spawner().spawn(task1(trace.clone(), true).unwrap());
+    unsafe { executor.poll() }; // parent runs and spawns child
+    unsafe { executor.poll() }; // child runs
+
+    assert_eq!(trace.get(), &["pend", "parent", "pend", "child",]);
+}
+
+#[test]
+fn wake_task_no_pend() {
+    use embassy_executor::raw::{task_from_waker, wake_task_no_pend};
+
+    #[task]
+    async fn task1(trace: Trace) {
+        let mut n = 0u8;
+        poll_fn(|cx| {
+            n += 1;
+            if n == 1 {
+                trace.push("first");
+                wake_task_no_pend(task_from_waker(cx.waker()));
+                Poll::Pending
+            } else {
+                trace.push("second");
+                Poll::Ready(())
+            }
+        })
+        .await
+    }
+
+    let (executor, trace) = setup();
+    executor.spawner().spawn(task1(trace.clone()).unwrap());
+    unsafe { executor.poll() };
+    // wake_task_no_pend must not have added another "pend"
+    assert_eq!(trace.get(), &["pend", "first"]);
+    unsafe { executor.poll() };
+    assert_eq!(trace.get(), &["pend", "first", "second"]);
+}
+
+#[test]
+fn task_ref_as_raw_roundtrip() {
+    use embassy_executor::raw::{TaskRef, task_from_waker};
+
+    #[task]
+    async fn task1(trace: Trace) {
+        poll_fn(|cx| {
+            let task = task_from_waker(cx.waker());
+            let raw = task.as_raw();
+            let roundtrip = unsafe { TaskRef::from_raw(raw) };
+            assert_eq!(task.id(), roundtrip.id());
+            trace.push("ok");
+            Poll::Ready(())
+        })
+        .await
+    }
+
+    let (executor, trace) = setup();
+    let token = task1(trace.clone()).unwrap();
+    let id = token.id();
+    assert_ne!(id, 0);
+    executor.spawner().spawn(token);
+    unsafe { executor.poll() };
+    assert_eq!(trace.get(), &["pend", "ok"]);
+}
+
+#[test]
+fn multi_task_batch_poll() {
+    #[task(pool_size = 3)]
+    async fn task1(trace: Trace, name: &'static str) {
+        trace.push(name);
+    }
+
+    let (executor, trace) = setup();
+    executor.spawner().spawn(task1(trace.clone(), "a").unwrap());
+    executor.spawner().spawn(task1(trace.clone(), "b").unwrap());
+    executor.spawner().spawn(task1(trace.clone(), "c").unwrap());
+    unsafe { executor.poll() };
+
+    let got = trace.get();
+    assert!(got.contains(&"pend"));
+    assert!(got.contains(&"a"));
+    assert!(got.contains(&"b"));
+    assert!(got.contains(&"c"));
+    // All three tasks run in a single poll (no extra pend between them).
+    let first_task = got.iter().position(|s| matches!(*s, "a" | "b" | "c")).unwrap();
+    assert!(got[first_task..].contains(&"a"));
+    assert!(got[first_task..].contains(&"b"));
+    assert!(got[first_task..].contains(&"c"));
+}
+
+#[test]
+#[should_panic]
+fn task_from_waker_rejects_foreign() {
+    use std::task::Waker;
+
+    use embassy_executor::raw::task_from_waker;
+
+    let _ = task_from_waker(Waker::noop());
+}

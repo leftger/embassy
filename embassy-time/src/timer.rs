@@ -629,3 +629,114 @@ mod test {
         assert!(ticker.checked_reset_after(Duration::MAX).is_none());
     }
 }
+
+#[cfg(all(test, feature = "mock-driver"))]
+mod mock_tests {
+    use core::future::{pending, ready};
+    use core::pin::pin;
+    use core::task::{Context, Poll};
+
+    use serial_test::serial;
+
+    use super::*;
+    use crate::MockDriver;
+
+    fn setup() {
+        MockDriver::get().reset();
+    }
+
+    fn poll_once<F: core::future::Future>(fut: &mut F) -> Poll<F::Output> {
+        let mut fut = unsafe { core::pin::Pin::new_unchecked(fut) };
+        let waker = core::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        fut.as_mut().poll(&mut cx)
+    }
+
+    #[test]
+    #[serial]
+    fn timer_after_ready_after_advance() {
+        setup();
+        let mut timer = Timer::after(Duration::from_secs(1));
+        assert!(matches!(poll_once(&mut timer), Poll::Pending));
+        MockDriver::get().advance(Duration::from_secs(1));
+        assert!(matches!(poll_once(&mut timer), Poll::Ready(())));
+    }
+
+    #[test]
+    #[serial]
+    fn timer_at_past_requires_yielded_once() {
+        setup();
+        let mut timer = Timer::at(Instant::now());
+        assert!(matches!(poll_once(&mut timer), Poll::Pending));
+        assert!(matches!(poll_once(&mut timer), Poll::Ready(())));
+    }
+
+    #[test]
+    #[serial]
+    fn ticker_every_advances_by_period() {
+        setup();
+        let mut ticker = Ticker::every(Duration::from_secs(1));
+        {
+            let mut next = pin!(ticker.next());
+            assert!(matches!(poll_once(&mut *next), Poll::Pending));
+            MockDriver::get().advance(Duration::from_secs(1));
+            assert!(matches!(poll_once(&mut *next), Poll::Ready(())));
+        }
+
+        // Next period still pending until another second passes.
+        {
+            let mut next = pin!(ticker.next());
+            assert!(matches!(poll_once(&mut *next), Poll::Pending));
+            MockDriver::get().advance(Duration::from_secs(1));
+            assert!(matches!(poll_once(&mut *next), Poll::Ready(())));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn ticker_now_and_every_fires_immediately() {
+        setup();
+        let mut ticker = Ticker::now_and_every(Duration::from_secs(1));
+        {
+            let mut next = pin!(ticker.next());
+            assert!(matches!(poll_once(&mut *next), Poll::Ready(())));
+        }
+
+        {
+            let mut next = pin!(ticker.next());
+            assert!(matches!(poll_once(&mut *next), Poll::Pending));
+            MockDriver::get().advance(Duration::from_secs(1));
+            assert!(matches!(poll_once(&mut *next), Poll::Ready(())));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn ticker_reset_to_now() {
+        setup();
+        let mut ticker = Ticker::every(Duration::from_secs(5));
+        ticker.reset_to_now();
+        let mut next = pin!(ticker.next());
+        assert!(matches!(poll_once(&mut *next), Poll::Ready(())));
+    }
+
+    #[test]
+    #[serial]
+    fn with_timeout_ok_and_err() {
+        setup();
+
+        let mut ok = with_timeout(Duration::from_secs(1), ready(42u32));
+        match poll_once(&mut ok) {
+            Poll::Ready(Ok(42)) => {}
+            other => panic!("expected Ok(42), got {:?}", other),
+        }
+
+        let mut timed = with_timeout(Duration::from_secs(1), pending::<()>());
+        assert!(matches!(poll_once(&mut timed), Poll::Pending));
+        MockDriver::get().advance(Duration::from_secs(1));
+        match poll_once(&mut timed) {
+            Poll::Ready(Err(TimeoutError)) => {}
+            other => panic!("expected Err(TimeoutError), got {:?}", other),
+        }
+    }
+}

@@ -144,4 +144,93 @@ mod tests {
         driver.advance(Duration::from_secs(1));
         assert_eq!(true, CALLBACK_CALLED.load(Ordering::Relaxed));
     }
+
+    #[test]
+    #[serial]
+    fn reset_clears_time() {
+        setup();
+        let driver = MockDriver::get();
+        driver.advance(Duration::from_secs(5));
+        assert!(driver.now() > 0);
+        driver.reset();
+        assert_eq!(driver.now(), 0);
+    }
+
+    #[test]
+    #[serial]
+    fn schedule_wake_past_fires_immediately() {
+        setup();
+
+        static CALLED: AtomicBool = AtomicBool::new(false);
+        struct MockWaker;
+        impl Wake for MockWaker {
+            fn wake(self: Arc<Self>) {
+                CALLED.store(true, Ordering::Relaxed);
+            }
+        }
+
+        let driver = MockDriver::get();
+        driver.advance(Duration::from_secs(2));
+        CALLED.store(false, Ordering::Relaxed);
+        let waker = Arc::new(MockWaker).into();
+        driver.schedule_wake(0, &waker);
+        assert!(CALLED.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    #[serial]
+    fn advance_does_not_wake_early() {
+        setup();
+
+        static CALLED: AtomicBool = AtomicBool::new(false);
+        struct MockWaker;
+        impl Wake for MockWaker {
+            fn wake(self: Arc<Self>) {
+                CALLED.store(true, Ordering::Relaxed);
+            }
+        }
+
+        let driver = MockDriver::get();
+        let waker = Arc::new(MockWaker).into();
+        let at = driver.now() + Duration::from_secs(2).as_ticks();
+        driver.schedule_wake(at, &waker);
+
+        driver.advance(Duration::from_secs(1));
+        assert!(!CALLED.load(Ordering::Relaxed));
+        driver.advance(Duration::from_secs(1));
+        assert!(CALLED.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    #[serial]
+    fn multiple_wakers_ordered() {
+        setup();
+
+        static FIRST: AtomicBool = AtomicBool::new(false);
+        static SECOND: AtomicBool = AtomicBool::new(false);
+
+        struct First;
+        impl Wake for First {
+            fn wake(self: Arc<Self>) {
+                FIRST.store(true, Ordering::Relaxed);
+            }
+        }
+        struct Second;
+        impl Wake for Second {
+            fn wake(self: Arc<Self>) {
+                SECOND.store(true, Ordering::Relaxed);
+            }
+        }
+
+        let driver = MockDriver::get();
+        let now = driver.now();
+        driver.schedule_wake(now + Duration::from_secs(1).as_ticks(), &Arc::new(First).into());
+        driver.schedule_wake(now + Duration::from_secs(3).as_ticks(), &Arc::new(Second).into());
+
+        driver.advance(Duration::from_secs(1));
+        assert!(FIRST.load(Ordering::Relaxed));
+        assert!(!SECOND.load(Ordering::Relaxed));
+        driver.advance(Duration::from_secs(2));
+        assert!(SECOND.load(Ordering::Relaxed));
+    }
 }
