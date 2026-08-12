@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- next-header -->
 ## Unreleased - ReleaseDate
 
+- Fix short DFU blocks writing stale leftover buffer bytes past the end of the transfer.
+
 ## 0.3.0 - 2026-03-10
 
 - changed: Do not reset in the GetStatus request

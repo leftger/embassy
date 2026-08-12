@@ -135,7 +135,7 @@ pub struct BootLoader<ACTIVE: NorFlash, DFU: NorFlash, STATE: NorFlash> {
     dfu: DFU,
     /// The state partition has the following format:
     /// All ranges are in multiples of WRITE_SIZE bytes.
-    /// N = Active partition size divided by WRITE_SIZE.
+    /// N = Active partition size divided by PAGE_SIZE (page count).
     /// | Range              | Description                                                                      |
     /// | 0..1               | Magic indicating bootloader state. BOOT_MAGIC means boot, SWAP_MAGIC means swap. |
     /// | 1..2               | Progress validity. ERASE_VALUE means valid, !ERASE_VALUE means invalid.          |
@@ -430,8 +430,9 @@ fn assert_partitions<ACTIVE: NorFlash, DFU: NorFlash, STATE: NorFlash>(
 ) {
     assert_eq!(active.capacity() as u32 % page_size, 0);
     assert_eq!(dfu.capacity() as u32 % page_size, 0);
-    // DFU partition has to be bigger than ACTIVE partition to handle swap algorithm
-    assert!(dfu.capacity() as u32 - active.capacity() as u32 >= page_size);
+    // DFU partition has to be at least one page bigger than ACTIVE for the swap algorithm.
+    // Compare with addition (not subtraction) so a too-small DFU cannot wrap in release builds.
+    assert!(dfu.capacity() >= active.capacity() + page_size as usize);
     assert!(2 + 4 * (active.capacity() as u32 / page_size) <= state.capacity() as u32 / STATE::WRITE_SIZE as u32);
 }
 
@@ -442,9 +443,21 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn test_range_asserts() {
+    fn test_range_asserts_state_too_small() {
         const ACTIVE_SIZE: usize = 4194304 - 4096;
         const DFU_SIZE: usize = 4194304;
+        const STATE_SIZE: usize = 4096;
+        static ACTIVE: MemFlash<ACTIVE_SIZE, 4, 4> = MemFlash::new(0xFF);
+        static DFU: MemFlash<DFU_SIZE, 4, 4> = MemFlash::new(0xFF);
+        static STATE: MemFlash<STATE_SIZE, 4, 4> = MemFlash::new(0xFF);
+        assert_partitions(&ACTIVE, &DFU, &STATE, 4096);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_range_asserts_dfu_smaller_than_active() {
+        const ACTIVE_SIZE: usize = 8192;
+        const DFU_SIZE: usize = 4096;
         const STATE_SIZE: usize = 4096;
         static ACTIVE: MemFlash<ACTIVE_SIZE, 4, 4> = MemFlash::new(0xFF);
         static DFU: MemFlash<DFU_SIZE, 4, 4> = MemFlash::new(0xFF);

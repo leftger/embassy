@@ -72,11 +72,26 @@ impl<'d, DFU: NorFlash, STATE: NorFlash, RST: Reset, const BLOCK_SIZE: usize> df
             return Err(Status::ErrUnknown);
         }
 
-        debug!("Copying {} bytes to buffer", data.len());
-        self.buf.as_mut()[..data.len()].copy_from_slice(data);
+        // Pad up to the flash write alignment. Only host-provided bytes count toward
+        // `offset` (used later for signature length); padding must not leak stale
+        // bytes from a previous block into the DFU partition.
+        let write_len = data.len().next_multiple_of(DFU::WRITE_SIZE);
+        if write_len > BLOCK_SIZE {
+            error!("Padded write exceeded block size");
+            return Err(Status::ErrUnknown);
+        }
 
-        debug!("Writing {} bytes at {}", data.len(), self.offset);
-        match self.updater.write_firmware(self.offset, self.buf.as_ref()) {
+        let buf = self.buf.as_mut();
+        buf[..data.len()].copy_from_slice(data);
+        buf[data.len()..write_len].fill(0);
+
+        debug!(
+            "Writing {} bytes (padded from {}) at {}",
+            write_len,
+            data.len(),
+            self.offset
+        );
+        match self.updater.write_firmware(self.offset, &buf[..write_len]) {
             Ok(_) => {
                 self.offset += data.len();
                 Ok(())

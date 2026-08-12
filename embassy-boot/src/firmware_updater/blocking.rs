@@ -3,7 +3,7 @@ use digest::Digest;
 use embassy_embedded_hal::flash::partition::BlockingPartition;
 #[cfg(target_os = "none")]
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embedded_storage::nor_flash::NorFlash;
+use embedded_storage::nor_flash::{NorFlash, NorFlashErrorKind};
 
 use super::FirmwareUpdaterConfig;
 use crate::{BOOT_MAGIC, DFU_DETACH_MAGIC, FirmwareUpdaterError, STATE_ERASE_VALUE, SWAP_MAGIC, State};
@@ -13,7 +13,8 @@ use crate::{BOOT_MAGIC, DFU_DETACH_MAGIC, FirmwareUpdaterError, STATE_ERASE_VALU
 pub struct BlockingFirmwareUpdater<'d, DFU: NorFlash, STATE: NorFlash> {
     dfu: DFU,
     state: BlockingFirmwareState<'d, STATE>,
-    last_erased_dfu_sector_index: Option<usize>,
+    /// True once the DFU partition has been erased for the current update.
+    dfu_erased: bool,
 }
 
 #[cfg(target_os = "none")]
@@ -92,7 +93,7 @@ impl<'d, DFU: NorFlash, STATE: NorFlash> BlockingFirmwareUpdater<'d, DFU, STATE>
         Self {
             dfu: config.dfu,
             state: BlockingFirmwareState::new(config.state, aligned),
-            last_erased_dfu_sector_index: None,
+            dfu_erased: false,
         }
     }
 
@@ -138,8 +139,8 @@ impl<'d, DFU: NorFlash, STATE: NorFlash> BlockingFirmwareUpdater<'d, DFU, STATE>
             let public_key = VerifyingKey::from_bytes(_public_key).map_err(into_signature_error)?;
             let signature = Signature::from_bytes(_signature);
 
+            let mut chunk_buf = [0; 64];
             let mut message = [0; 64];
-            let mut chunk_buf = [0; 2];
             self.hash::<Sha512>(_update_len, &mut chunk_buf, &mut message)?;
 
             public_key.verify(&message, &signature).map_err(into_signature_error)?;
@@ -160,7 +161,7 @@ impl<'d, DFU: NorFlash, STATE: NorFlash> BlockingFirmwareUpdater<'d, DFU, STATE>
             let signature = Signature::try_from(_signature).map_err(into_signature_error)?;
 
             let mut message = [0; 64];
-            let mut chunk_buf = [0; 2];
+            let mut chunk_buf = [0; 64];
             self.hash::<Sha512>(_update_len, &mut chunk_buf, &mut message)?;
 
             let r = public_key.verify(&message, &signature);
@@ -187,11 +188,27 @@ impl<'d, DFU: NorFlash, STATE: NorFlash> BlockingFirmwareUpdater<'d, DFU, STATE>
         chunk_buf: &mut [u8],
         output: &mut [u8],
     ) -> Result<(), FirmwareUpdaterError> {
+        assert!(!chunk_buf.is_empty());
+        assert_eq!(chunk_buf.len() % DFU::READ_SIZE, 0);
+
         let mut digest = D::new();
-        for offset in (0..update_len).step_by(chunk_buf.len()) {
-            self.dfu.read(offset, chunk_buf)?;
-            let len = core::cmp::min((update_len - offset) as usize, chunk_buf.len());
+        let mut offset = 0u32;
+        while offset < update_len {
+            let remaining = (update_len - offset) as usize;
+            let len = remaining.min(chunk_buf.len());
+            // Read an aligned length so flashes with READ_SIZE > 1 succeed, but never
+            // request bytes past the DFU partition.
+            let mut read_len = len.next_multiple_of(DFU::READ_SIZE);
+            let max_read = self.dfu.capacity().saturating_sub(offset as usize);
+            read_len = read_len.min(max_read);
+            read_len -= read_len % DFU::READ_SIZE;
+            if read_len < len {
+                return Err(FirmwareUpdaterError::Flash(NorFlashErrorKind::OutOfBounds));
+            }
+
+            self.dfu.read(offset, &mut chunk_buf[..read_len])?;
             digest.update(&chunk_buf[..len]);
+            offset += len as u32;
         }
         output.copy_from_slice(digest.finalize().as_slice());
         Ok(())
@@ -228,10 +245,9 @@ impl<'d, DFU: NorFlash, STATE: NorFlash> BlockingFirmwareUpdater<'d, DFU, STATE>
     /// Writes firmware data to the device.
     ///
     /// This function writes the given data to the firmware area starting at the specified offset.
-    /// It handles sector erasures and data writes while verifying the device is in a proper state
-    /// for firmware updates. The function ensures that only unerased sectors are erased before
-    /// writing and efficiently handles the writing process across sector boundaries and in
-    /// various configurations (data size, sector size, etc.).
+    /// On the first write of an update, the entire DFU partition is erased so a shorter image
+    /// cannot leave a stale tail that would later be swapped into the active partition.
+    /// Subsequent writes only program flash.
     ///
     /// # Arguments
     ///
@@ -254,36 +270,23 @@ impl<'d, DFU: NorFlash, STATE: NorFlash> BlockingFirmwareUpdater<'d, DFU, STATE>
         // Make sure we are running a booted firmware to avoid reverting to a bad state.
         self.state.verify_booted()?;
 
-        // Initialize variables to keep track of the remaining data and the current offset.
+        if !self.dfu_erased {
+            // Wipe the whole DFU region up front so unwritten pages cannot retain a previous image.
+            self.dfu.erase(0, self.dfu.capacity() as u32)?;
+            self.dfu_erased = true;
+        }
+
         let mut remaining_data = data;
         let mut offset = offset;
 
-        // Continue writing as long as there is data left to write.
         while !remaining_data.is_empty() {
-            // Compute the current sector and its boundaries.
             let current_sector = offset / DFU::ERASE_SIZE;
-            let sector_start = current_sector * DFU::ERASE_SIZE;
-            let sector_end = sector_start + DFU::ERASE_SIZE;
-            // Determine if the current sector needs to be erased before writing.
-            let need_erase = self
-                .last_erased_dfu_sector_index
-                .map_or(true, |last_erased_sector| current_sector != last_erased_sector);
-
-            // If the sector needs to be erased, erase it and update the last erased sector index.
-            if need_erase {
-                self.dfu.erase(sector_start as u32, sector_end as u32)?;
-                self.last_erased_dfu_sector_index = Some(current_sector);
-            }
-
-            // Calculate the size of the data chunk that can be written in the current iteration.
+            let sector_end = (current_sector + 1) * DFU::ERASE_SIZE;
             let write_size = core::cmp::min(remaining_data.len(), sector_end - offset);
-            // Split the data to get the current chunk to be written and the remaining data.
             let (data_chunk, rest) = remaining_data.split_at(write_size);
 
-            // Write the current data chunk.
             self.dfu.write(offset as u32, data_chunk)?;
 
-            // Update the offset and remaining data for the next iteration.
             remaining_data = rest;
             offset += write_size;
         }
@@ -299,6 +302,7 @@ impl<'d, DFU: NorFlash, STATE: NorFlash> BlockingFirmwareUpdater<'d, DFU, STATE>
     pub fn prepare_update(&mut self) -> Result<&mut DFU, FirmwareUpdaterError> {
         self.state.verify_booted()?;
         self.dfu.erase(0, self.dfu.capacity() as u32)?;
+        self.dfu_erased = true;
 
         Ok(&mut self.dfu)
     }
@@ -317,8 +321,8 @@ impl<'d, STATE: NorFlash> BlockingFirmwareState<'d, STATE> {
     ///
     /// # Safety
     ///
-    /// The `aligned` buffer must have a size of STATE::WRITE_SIZE, and follow the alignment rules for the flash being read from
-    /// and written to.
+    /// The `aligned` buffer must have a size of `STATE::WRITE_SIZE.max(STATE::READ_SIZE)`, and follow
+    /// the alignment rules for the flash being read from and written to.
     pub fn from_config<DFU: NorFlash>(config: FirmwareUpdaterConfig<DFU, STATE>, aligned: &'d mut [u8]) -> Self {
         Self::new(config.state, aligned)
     }
@@ -327,10 +331,10 @@ impl<'d, STATE: NorFlash> BlockingFirmwareState<'d, STATE> {
     ///
     /// # Safety
     ///
-    /// The `aligned` buffer must have a size of STATE::WRITE_SIZE, and follow the alignment rules for the flash being read from
-    /// and written to.
+    /// The `aligned` buffer must have a size of `STATE::WRITE_SIZE.max(STATE::READ_SIZE)`, and follow
+    /// the alignment rules for the flash being read from and written to.
     pub fn new(state: STATE, aligned: &'d mut [u8]) -> Self {
-        assert_eq!(aligned.len(), STATE::WRITE_SIZE);
+        assert_eq!(aligned.len(), STATE::WRITE_SIZE.max(STATE::READ_SIZE));
         Self { state, aligned }
     }
 
@@ -351,7 +355,7 @@ impl<'d, STATE: NorFlash> BlockingFirmwareState<'d, STATE> {
     /// `mark_booted`.
     pub fn get_state(&mut self) -> Result<State, FirmwareUpdaterError> {
         self.state.read(0, &mut self.aligned)?;
-        Ok(State::from(&self.aligned))
+        Ok(State::from(&self.aligned[..STATE::WRITE_SIZE]))
     }
 
     /// Mark to trigger firmware swap on next boot.
@@ -372,16 +376,24 @@ impl<'d, STATE: NorFlash> BlockingFirmwareState<'d, STATE> {
     fn set_magic(&mut self, magic: u8) -> Result<(), FirmwareUpdaterError> {
         self.state.read(0, &mut self.aligned)?;
 
-        if self.aligned.iter().any(|&b| b != magic) {
+        if self.aligned[..STATE::WRITE_SIZE].iter().any(|&b| b != magic) {
             // Read progress validity
-            self.state.read(STATE::WRITE_SIZE as u32, &mut self.aligned)?;
+            if STATE::READ_SIZE <= 2 * STATE::WRITE_SIZE {
+                self.state.read(STATE::WRITE_SIZE as u32, &mut self.aligned)?;
+            } else {
+                self.aligned.rotate_left(STATE::WRITE_SIZE);
+            }
 
-            if self.aligned.iter().any(|&b| b != STATE_ERASE_VALUE) {
+            if self.aligned[..STATE::WRITE_SIZE]
+                .iter()
+                .any(|&b| b != STATE_ERASE_VALUE)
+            {
                 // The current progress validity marker is invalid
             } else {
                 // Invalidate progress
                 self.aligned.fill(!STATE_ERASE_VALUE);
-                self.state.write(STATE::WRITE_SIZE as u32, &self.aligned)?;
+                self.state
+                    .write(STATE::WRITE_SIZE as u32, &self.aligned[..STATE::WRITE_SIZE])?;
             }
 
             // Clear magic and progress
@@ -389,7 +401,7 @@ impl<'d, STATE: NorFlash> BlockingFirmwareState<'d, STATE> {
 
             // Set magic
             self.aligned.fill(magic);
-            self.state.write(0, &self.aligned)?;
+            self.state.write(0, &self.aligned[..STATE::WRITE_SIZE])?;
         }
         Ok(())
     }
@@ -505,5 +517,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(Sha1::digest(update).as_slice(), hash);
+    }
+
+    #[test]
+    fn hash_does_not_read_past_dfu_capacity() {
+        // DFU is exactly one erase page; hashing the full capacity with a chunk larger than the
+        // final remainder must not attempt to read past the partition end.
+        let flash = Mutex::<NoopRawMutex, _>::new(RefCell::new(MemFlash::<8192, 4096, 8>::default()));
+        let state = BlockingPartition::new(&flash, 0, 4096);
+        let dfu = BlockingPartition::new(&flash, 4096, 4096);
+        let mut aligned = [0; 8];
+
+        let mut updater = BlockingFirmwareUpdater::new(FirmwareUpdaterConfig { dfu, state }, &mut aligned);
+        let mut chunk_buf = [0; 64];
+        let mut hash = [0; 20];
+        updater.hash::<Sha1>(4096, &mut chunk_buf, &mut hash).unwrap();
+    }
+
+    #[test]
+    fn write_firmware_erases_stale_dfu_tail() {
+        let flash = Mutex::<NoopRawMutex, _>::new(RefCell::new(MemFlash::<16384, 4096, 8>::default()));
+        // Poison the DFU region with a previous image pattern.
+        flash.lock(|f| {
+            f.borrow_mut().program(4096, &[0xA5; 8192]).unwrap();
+        });
+
+        let state = BlockingPartition::new(&flash, 0, 4096);
+        let dfu = BlockingPartition::new(&flash, 4096, 8192);
+        let mut aligned = [0; 8];
+        let mut updater = BlockingFirmwareUpdater::new(FirmwareUpdaterConfig { dfu, state }, &mut aligned);
+
+        let page = [0x11; 4096];
+        updater.write_firmware(0, &page).unwrap();
+
+        flash.lock(|f| {
+            let mem = &f.borrow().mem;
+            assert!(mem[4096..8192].iter().all(|&b| b == 0x11));
+            // Unwritten second DFU page must be erased, not left as the previous 0xA5 image.
+            assert!(mem[8192..12288].iter().all(|&b| b == 0xFF));
+        });
     }
 }

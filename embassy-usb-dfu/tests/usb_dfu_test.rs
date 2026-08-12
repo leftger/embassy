@@ -138,12 +138,12 @@ impl<H: DfuModeHandler> DfuIo for InMemoryDfu<H> {
     }
 }
 
-fn usb_dfu(dfu_attributes: DfuAttributes) {
+fn usb_dfu(dfu_attributes: DfuAttributes, firmware: &[u8]) {
     let mut aligned_buffer = [0; READ_WRITE_SIZE];
 
     const BLOCK_SIZE: usize = 128;
 
-    let dfu_buffer = RefCell::new([0; { BLOCK_SIZE * 2 }]);
+    let dfu_buffer = RefCell::new([0xff; { BLOCK_SIZE * 2 }]);
     let dfu_partition = InMemoryFlashPartition { buffer: &dfu_buffer };
     let state_buffer = RefCell::new([0; { READ_WRITE_SIZE * 2 }]);
     let state_partition = InMemoryFlashPartition { buffer: &state_buffer };
@@ -159,7 +159,7 @@ fn usb_dfu(dfu_attributes: DfuAttributes) {
         manifestation_tolerant: dfu_attributes.contains(DfuAttributes::MANIFESTATION_TOLERANT),
         will_detach: dfu_attributes.contains(DfuAttributes::WILL_DETACH),
         detach_timeout: 10,
-        transfer_size: READ_WRITE_SIZE as u16,
+        transfer_size: BLOCK_SIZE as u16,
         dfu_version: (1, 1),
     };
     let dfu_state = new_state::<_, _, _, BLOCK_SIZE>(updater, dfu_attributes, NoopReset {});
@@ -168,29 +168,50 @@ fn usb_dfu(dfu_attributes: DfuAttributes) {
         dfu_state: RefCell::new(dfu_state),
     });
 
-    let firmware = [42; BLOCK_SIZE];
-    let err = dfu.download_from_slice(&firmware);
+    let err = dfu.download_from_slice(firmware);
     println!("{:?}", err);
-    assert_eq!(&dfu_buffer.borrow()[..firmware.len()], firmware);
     assert!(err.is_ok());
+    assert_eq!(&dfu_buffer.borrow()[..firmware.len()], firmware);
+
+    // Short final blocks must pad with zeros up to WRITE_SIZE, not leak bytes from the
+    // previous USB packet into the DFU partition.
+    let padded_end = firmware.len().next_multiple_of(READ_WRITE_SIZE);
+    assert!(dfu_buffer.borrow()[firmware.len()..padded_end].iter().all(|&b| b == 0));
 }
 
 #[test]
 fn test_usb_dfu_manifestation_tolerant_will_detach() {
-    usb_dfu(DfuAttributes::CAN_DOWNLOAD | DfuAttributes::MANIFESTATION_TOLERANT | DfuAttributes::WILL_DETACH);
+    usb_dfu(
+        DfuAttributes::CAN_DOWNLOAD | DfuAttributes::MANIFESTATION_TOLERANT | DfuAttributes::WILL_DETACH,
+        &[42; 128],
+    );
 }
 
 #[test]
 fn test_usb_dfu_manifestation_tolerant() {
-    usb_dfu(DfuAttributes::CAN_DOWNLOAD | DfuAttributes::MANIFESTATION_TOLERANT);
+    usb_dfu(
+        DfuAttributes::CAN_DOWNLOAD | DfuAttributes::MANIFESTATION_TOLERANT,
+        &[42; 128],
+    );
 }
 
 #[test]
 fn test_usb_dfu_will_detach() {
-    usb_dfu(DfuAttributes::CAN_DOWNLOAD | DfuAttributes::WILL_DETACH);
+    usb_dfu(DfuAttributes::CAN_DOWNLOAD | DfuAttributes::WILL_DETACH, &[42; 128]);
 }
 
 #[test]
 fn test_usb_dfu() {
-    usb_dfu(DfuAttributes::CAN_DOWNLOAD);
+    usb_dfu(DfuAttributes::CAN_DOWNLOAD, &[42; 128]);
+}
+
+#[test]
+fn test_usb_dfu_short_final_block_does_not_leak_previous_packet() {
+    // First block is a distinctive pattern; the short final block would previously
+    // leave that pattern in the padding region past the real firmware end.
+    let mut firmware = vec![0u8; 128 + 40];
+    for (i, b) in firmware.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    usb_dfu(DfuAttributes::CAN_DOWNLOAD, &firmware);
 }
