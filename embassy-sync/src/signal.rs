@@ -143,3 +143,78 @@ where
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use core::time::Duration;
+
+    use futures_executor::{ThreadPool, block_on};
+    use futures_timer::Delay;
+    use futures_util::task::SpawnExt;
+    use static_cell::StaticCell;
+
+    use super::*;
+    use crate::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
+
+    #[test]
+    fn try_take_empty() {
+        let s = Signal::<NoopRawMutex, u32>::new();
+        assert!(!s.signaled());
+        assert_eq!(s.try_take(), None);
+    }
+
+    #[test]
+    fn signal_and_try_take() {
+        let s = Signal::<NoopRawMutex, u32>::new();
+        s.signal(7);
+        assert!(s.signaled());
+        assert_eq!(s.try_take(), Some(7));
+        assert!(!s.signaled());
+        assert_eq!(s.try_take(), None);
+    }
+
+    #[test]
+    fn signal_overwrites() {
+        let s = Signal::<NoopRawMutex, u32>::new();
+        s.signal(1);
+        s.signal(2);
+        assert_eq!(s.try_take(), Some(2));
+    }
+
+    #[test]
+    fn reset_clears_value() {
+        let s = Signal::<NoopRawMutex, u32>::new();
+        s.signal(3);
+        s.reset();
+        assert!(!s.signaled());
+        assert_eq!(s.try_take(), None);
+    }
+
+    #[test]
+    fn wait_after_signal() {
+        block_on(async {
+            let s = Signal::<NoopRawMutex, u32>::new();
+            s.signal(5);
+            assert_eq!(s.wait().await, 5);
+            assert!(!s.signaled());
+        });
+    }
+
+    #[futures_test::test]
+    async fn wait_then_signal() {
+        let executor = ThreadPool::new().unwrap();
+
+        static SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, u32>> = StaticCell::new();
+        let s = &*SIGNAL.init(Signal::new());
+        let s2 = s;
+        assert!(
+            executor
+                .spawn(async move {
+                    Delay::new(Duration::from_millis(10)).await;
+                    s2.signal(9);
+                })
+                .is_ok()
+        );
+        assert_eq!(s.wait().await, 9);
+    }
+}

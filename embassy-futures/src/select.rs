@@ -543,3 +543,98 @@ impl<'a, Fut: Future> Future for SelectSlice<'a, Fut> {
         Poll::Pending
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use core::future::{pending, poll_fn, ready};
+    use core::pin::{Pin, pin};
+    use core::task::{Context, Poll};
+
+    use super::*;
+    use crate::block_on;
+
+    struct ConstFut {
+        ready: bool,
+        value: u32,
+    }
+
+    impl Future for ConstFut {
+        type Output = u32;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.ready {
+                Poll::Ready(self.value)
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    #[test]
+    fn select_first_when_both_ready() {
+        let result = block_on(select(ready(1u32), ready(2u32)));
+        assert!(result.is_first());
+        assert!(!result.is_second());
+        match result {
+            Either::First(1) => {}
+            _ => panic!("expected First(1)"),
+        }
+    }
+
+    #[test]
+    fn select_second_when_first_pending() {
+        let result = block_on(select(pending::<u32>(), ready(42u32)));
+        assert!(result.is_second());
+        match result {
+            Either::Second(42) => {}
+            _ => panic!("expected Second(42)"),
+        }
+    }
+
+    #[test]
+    fn select3_second_wins() {
+        let result = block_on(select3(pending::<u8>(), ready(7u8), ready(9u8)));
+        assert!(result.is_second());
+        match result {
+            Either3::Second(7) => {}
+            _ => panic!("expected Second(7)"),
+        }
+    }
+
+    #[test]
+    fn select_array_returns_index() {
+        let result = block_on(select_array([
+            ConstFut { ready: false, value: 0 },
+            ConstFut { ready: true, value: 5 },
+            ConstFut { ready: true, value: 6 },
+        ]));
+        assert_eq!(result, (5, 1));
+    }
+
+    #[test]
+    fn select_slice_returns_index() {
+        let futs = [ConstFut { ready: false, value: 0 }, ConstFut { ready: true, value: 11 }];
+        let pinned = pin!(futs);
+        let result = block_on(select_slice(pinned));
+        assert_eq!(result, (11, 1));
+    }
+
+    #[test]
+    fn select_pending_until_ready() {
+        let mut polls = 0u8;
+        let slow = poll_fn(move |cx| {
+            polls += 1;
+            if polls >= 3 {
+                Poll::Ready(99u32)
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        });
+        let result = block_on(select(slow, pending::<u32>()));
+        match result {
+            Either::First(99) => {}
+            _ => panic!("expected First(99)"),
+        }
+    }
+}

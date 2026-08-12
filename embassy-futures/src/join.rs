@@ -320,3 +320,42 @@ pub fn join_array<Fut: Future, const N: usize>(futures: [Fut; N]) -> JoinArray<F
         futures: futures.map(MaybeDone::Future),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use core::future::{poll_fn, ready};
+    use core::task::Poll;
+
+    use super::*;
+    use crate::block_on;
+
+    #[test]
+    fn join_two_ready() {
+        assert_eq!(block_on(join(ready(1u32), ready(2u32))), (1, 2));
+    }
+
+    #[test]
+    fn join3_ready() {
+        assert_eq!(block_on(join3(ready(1u32), ready(2u32), ready(3u32))), (1, 2, 3));
+    }
+
+    #[test]
+    fn join_waits_for_pending() {
+        let mut left = 2usize;
+        let slow = poll_fn(move |cx| {
+            if left == 0 {
+                Poll::Ready(7u32)
+            } else {
+                left -= 1;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        });
+        assert_eq!(block_on(join(slow, ready(3u32))), (7, 3));
+    }
+
+    #[test]
+    fn join_array_ready() {
+        assert_eq!(block_on(join_array([ready(1u32), ready(2u32), ready(3u32)])), [1, 2, 3]);
+    }
+}

@@ -410,3 +410,179 @@ impl State {
         self.receive_waker.wake();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocking_mutex::raw::NoopRawMutex;
+
+    #[test]
+    fn empty_on_new() {
+        let mut buf = [0u32; 3];
+        let channel = Channel::<NoopRawMutex, _>::new(&mut buf);
+        assert!(channel.is_empty());
+        assert!(!channel.is_full());
+        assert_eq!(channel.len(), 0);
+    }
+
+    #[test]
+    fn send_receive_once() {
+        let mut buf = [0u32; 3];
+        let mut channel = Channel::<NoopRawMutex, _>::new(&mut buf);
+        let (mut tx, mut rx) = channel.split();
+
+        let mut slot = tx.try_send().unwrap();
+        *slot = 42;
+        slot.send_done();
+        assert_eq!(tx.len(), 1);
+        assert!(!tx.is_empty());
+
+        let slot = rx.try_receive().unwrap();
+        assert_eq!(*slot, 42);
+        slot.receive_done();
+        assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn try_send_full_and_try_receive_empty() {
+        let mut buf = [0u32; 2];
+        let mut channel = Channel::<NoopRawMutex, _>::new(&mut buf);
+        let (mut tx, mut rx) = channel.split();
+
+        assert!(rx.try_receive().is_none());
+
+        for v in [1u32, 2] {
+            let mut slot = tx.try_send().unwrap();
+            *slot = v;
+            slot.send_done();
+        }
+        assert!(tx.is_full());
+        assert!(tx.try_send().is_none());
+    }
+
+    #[test]
+    fn drop_send_slot_without_done_does_not_commit() {
+        let mut buf = [0u32; 2];
+        let mut channel = Channel::<NoopRawMutex, _>::new(&mut buf);
+        let (mut tx, _rx) = channel.split();
+
+        {
+            let mut slot = tx.try_send().unwrap();
+            *slot = 99;
+            // drop without send_done
+        }
+        assert_eq!(tx.len(), 0);
+        assert!(tx.is_empty());
+
+        let mut slot = tx.try_send().unwrap();
+        *slot = 1;
+        slot.send_done();
+        assert_eq!(tx.len(), 1);
+    }
+
+    #[test]
+    fn drop_receive_slot_without_done_does_not_pop() {
+        let mut buf = [0u32; 2];
+        let mut channel = Channel::<NoopRawMutex, _>::new(&mut buf);
+        let (mut tx, mut rx) = channel.split();
+
+        let mut slot = tx.try_send().unwrap();
+        *slot = 7;
+        slot.send_done();
+        assert_eq!(rx.len(), 1);
+
+        {
+            let slot = rx.try_receive().unwrap();
+            assert_eq!(*slot, 7);
+            // drop without receive_done
+        }
+        assert_eq!(rx.len(), 1);
+
+        let slot = rx.try_receive().unwrap();
+        assert_eq!(*slot, 7);
+        slot.receive_done();
+        assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn wraparound() {
+        let mut buf = [0u32; 2];
+        let mut channel = Channel::<NoopRawMutex, _>::new(&mut buf);
+        let (mut tx, mut rx) = channel.split();
+
+        for v in [10u32, 20] {
+            let mut slot = tx.try_send().unwrap();
+            *slot = v;
+            slot.send_done();
+        }
+        assert!(tx.is_full());
+
+        let slot = rx.try_receive().unwrap();
+        assert_eq!(*slot, 10);
+        slot.receive_done();
+
+        let mut slot = tx.try_send().unwrap();
+        *slot = 30;
+        slot.send_done();
+
+        let slot = rx.try_receive().unwrap();
+        assert_eq!(*slot, 20);
+        slot.receive_done();
+        let slot = rx.try_receive().unwrap();
+        assert_eq!(*slot, 30);
+        slot.receive_done();
+        assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn clear_empties_channel() {
+        let mut buf = [0u32; 3];
+        let mut channel = Channel::<NoopRawMutex, _>::new(&mut buf);
+        let (mut tx, mut rx) = channel.split();
+
+        for v in [1u32, 2, 3] {
+            let mut slot = tx.try_send().unwrap();
+            *slot = v;
+            slot.send_done();
+        }
+        assert!(tx.is_full());
+
+        rx.clear();
+        assert!(rx.is_empty());
+        assert_eq!(rx.len(), 0);
+
+        let mut slot = tx.try_send().unwrap();
+        *slot = 9;
+        slot.send_done();
+        let slot = rx.try_receive().unwrap();
+        assert_eq!(*slot, 9);
+        slot.receive_done();
+    }
+
+    #[test]
+    fn receive_future_pending_then_ready() {
+        use core::pin::pin;
+        use core::task::{Context, Poll, Waker};
+
+        let mut buf = [0u32; 2];
+        let mut channel = Channel::<NoopRawMutex, _>::new(&mut buf);
+        let (mut tx, mut rx) = channel.split();
+
+        let mut fut = pin!(rx.receive());
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+
+        let mut slot = tx.try_send().unwrap();
+        *slot = 123;
+        slot.send_done();
+
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(slot) => {
+                assert_eq!(*slot, 123);
+                slot.receive_done();
+            }
+            Poll::Pending => panic!("expected receive to complete after send"),
+        }
+    }
+}

@@ -47,3 +47,32 @@ impl Future for YieldNowFuture {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use core::pin::pin;
+    use core::ptr;
+    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    use super::*;
+
+    static VTABLE: RawWakerVTable =
+        RawWakerVTable::new(|_| RawWaker::new(ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
+
+    #[test]
+    fn yield_now_pending_then_ready() {
+        let mut fut = pin!(yield_now());
+        let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(())));
+    }
+
+    #[test]
+    fn yield_now_under_block_on() {
+        crate::block_on(async {
+            yield_now().await;
+            yield_now().await;
+        });
+    }
+}

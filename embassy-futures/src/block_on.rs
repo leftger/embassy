@@ -43,3 +43,34 @@ pub fn poll_once<F: Future>(mut fut: F) -> Poll<F::Output> {
 
     fut.as_mut().poll(&mut cx)
 }
+
+#[cfg(test)]
+mod tests {
+    use core::future::{pending, ready};
+    use core::task::Poll;
+
+    use super::*;
+    use crate::yield_now;
+
+    #[test]
+    fn block_on_ready() {
+        assert_eq!(block_on(ready(42)), 42);
+    }
+
+    #[test]
+    fn block_on_yield_now() {
+        block_on(async {
+            yield_now().await;
+        });
+    }
+
+    #[test]
+    fn poll_once_ready() {
+        assert_eq!(poll_once(ready(7)), Poll::Ready(7));
+    }
+
+    #[test]
+    fn poll_once_pending() {
+        assert!(matches!(poll_once(pending::<()>()), Poll::Pending));
+    }
+}
