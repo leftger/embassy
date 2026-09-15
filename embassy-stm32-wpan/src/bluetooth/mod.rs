@@ -13,7 +13,7 @@ use embassy_futures::yield_now;
 use embassy_stm32::interrupt;
 use stm32wb_hci::event::{
     DisconnectionComplete, LeConnectionComplete, LeConnectionUpdateComplete, LeDataLengthChangeEvent,
-    LeEnhancedConnectionComplete, LePhyUpdateComplete,
+    LeEnhancedConnectionComplete, LePhyUpdateComplete, LeRemoteConnectionParameterRequest,
 };
 use stm32wb_hci::host::HostHci;
 use stm32wb_hci::host::uart::Packet;
@@ -696,6 +696,31 @@ impl<'d> HCI<'d, Normal> {
                 } else {
                     None
                 }
+            }
+            Event::LeRemoteConnectionParameterRequest(LeRemoteConnectionParameterRequest {
+                conn_handle,
+                conn_interval,
+            }) => {
+                // When this event is unmasked the controller waits for a host reply. Accept the
+                // requested parameters so pairing is not blocked (Android sends this immediately
+                // after connect).
+                let (interval_min, interval_max) = conn_interval.interval();
+                let min = (interval_min.as_micros() / 1_250) as u16;
+                let max = (interval_max.as_micros() / 1_250) as u16;
+                let timeout = (conn_interval.supervision_timeout().as_micros() / 10_000) as u16;
+                match self.cmd_sender.le_remote_connection_parameter_request_reply(
+                    conn_handle.0,
+                    min,
+                    max,
+                    conn_interval.conn_latency(),
+                    timeout,
+                    0,
+                    0,
+                ) {
+                    Ok(()) => info!("accepted remote connection parameter request"),
+                    Err(e) => warn!("conn param request reply failed: {:?}", e),
+                }
+                None
             }
             Event::LeConnectionUpdateComplete(LeConnectionUpdateComplete {
                 status,
