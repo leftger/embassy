@@ -279,11 +279,18 @@ impl<'d> HCI<'d, Normal> {
         }
 
         // Configure host-stack advertising parameters/data. `configure` also
-        // applies the full AD payload and the scan response.
+        // applies the full AD payload and the scan response, and the GAP command
+        // it issues starts advertising by itself.
+        //
+        // Deliberately no HCI_LE_Set_Advertising_Enable here. ST's interface
+        // documentation states it "must not be used when the Host stack is
+        // active (see ACI GAP commands instead)", and their reference
+        // applications never call it. Driving the link layer directly after GAP
+        // has already armed advertising splits the controller's advertising and
+        // filter state from GAP's, which stays invisible until the resolving and
+        // filter accept lists are populated and then makes the controller refuse
+        // every connection while still advertising -- no HCI event, nothing to log.
         gap::advertiser::configure(&self.cmd_sender, &params, &adv_data, scan_rsp_data.as_ref())?;
-
-        // Enable LL advertising
-        self.cmd_sender.le_set_advertise_enable(true)?;
         yield_now().await;
 
         self.is_advertising = true;
@@ -301,12 +308,10 @@ impl<'d> HCI<'d, Normal> {
             return Ok(());
         }
 
-        // Disable LL advertising
-        self.cmd_sender.le_set_advertise_enable(false)?;
-        yield_now().await;
-
-        // Remove advertising configuration from the host stack
+        // `aci_gap_set_non_discoverable` stops advertising through GAP; see
+        // `start_advertising` for why the raw HCI enable/disable is not used.
         gap::advertiser::unconfigure()?;
+        yield_now().await;
 
         self.is_advertising = false;
         Ok(())

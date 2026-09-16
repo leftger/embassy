@@ -571,7 +571,12 @@ impl SecurityManager {
                 params.keypress_notification as u8,
                 params.min_encryption_key_size,
                 params.max_encryption_key_size,
-                params.use_fixed_pin as u8,
+                // Inverted on purpose: ST's parameter is a *prohibition*, not a
+                // request. USE_FIXED_PIN_FOR_PAIRING_ALLOWED is 0x00 and
+                // ..._FORBIDDEN is 0x01, so passing this flag through unchanged
+                // made the default (`use_fixed_pin: false`) enable the deprecated
+                // fixed-PIN pairing with PIN 000000 instead of disabling it.
+                !params.use_fixed_pin as u8,
                 params.fixed_pin,
                 params.identity_address_type as u8,
             );
