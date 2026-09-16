@@ -929,50 +929,14 @@ impl SecurityManager {
     /// Rebuild the controller's resolving list from the bonds currently in the
     /// security database, and clear the Filter Accept List.
     ///
-    /// Modelled on ST `BLE_Privacy_Peripheral` `configure_filter_and_resolving_list()`,
-    /// but clear-then-rebuild rather than append, which makes it idempotent: one
-    /// call brings the controller in line with the database from any prior state.
-    /// Zero bonds therefore leaves both lists empty and address resolution off,
-    /// matching a freshly reset controller.
-    ///
-    /// Appending instead (and returning early when the database is empty, as
-    /// this used to) strands entries in the controller after the bonds that
-    /// created them are gone — so a peripheral that cleared its bonds at runtime
-    /// needed a hardware reset before it could bond again — and can duplicate a
-    /// peer across calls in a list that is typically only eight entries deep.
-    ///
-    /// The two clears run with address resolution disabled because the Core Spec
-    /// forbids mutating the resolving list while translation is enabled
-    /// (Vol 4, Part E, 7.8.40). Resolution is then re-enabled before the add,
-    /// which is the order ST's reference uses.
+    /// CubeWBA 1.10 mode 0x0D atomically clears both lists and repopulates them
+    /// from the security database. GAP therefore owns the full operation and
+    /// keeps its internal privacy state synchronized with the controller.
     ///
     /// Must NOT be called while advertising, scanning, or initiating is active.
     /// Returns the number of bonds programmed.
     pub fn configure_filter_and_resolving_list(&self) -> Result<usize, BleError> {
-        // This mirrors ST's BLE_Privacy_Peripheral `configure_filter_and_resolving_list()`
-        // exactly: read the bonded identities, then hand them to GAP in one call.
-        //
-        // Mode 0x04 appends to both the resolving list and the Filter Accept List.
-        // Populating the FAL is harmless on its own -- it only gates traffic if the
-        // advertiser also passes a filter policy that consults it, and callers that
-        // want new peers to be able to connect simply keep the policy permissive.
-        //
-        // Everything else must be left to GAP. It is tempting to bracket this with
-        // HCI_LE_Set_Address_Resolution_Enable and clear the two lists first so the
-        // rebuild starts from a known state, but `aci_gap_init` with privacy 0x02
-        // makes GAP the owner of the resolving list and of the resolution enable
-        // flag. Driving them over raw HCI desynchronises GAP's view from the
-        // controller's, and the failure is silent and total: advertising still
-        // reports success and stays on the air with a valid RPA, yet the controller
-        // accepts no connection at all, so no HCI event is ever generated for the
-        // host to log. Scanners see the device and every connect attempt times out.
-        //
-        // For the same reason there is no HCI_LE_Set_Privacy_Mode loop here.
-        //
-        // A List_Entry_t is only an address type plus an address; the stack pairs
-        // each one with the IRK it already holds in the security database for that
-        // identity. That is why ST passes the bonded identities straight through.
-        const GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS: u8 = 0x04;
+        const GAP_ADD_DEV_MODE_CLEAR_BOTH_FROM_SDB: u8 = 0x0D;
 
         const MAX_BONDED: usize = 16;
         let mut entries = [BondedDeviceEntry {
@@ -987,21 +951,16 @@ impl SecurityManager {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
-            let count = (num as usize).min(MAX_BONDED) as u8;
-            if count == 0 {
-                return Ok(0);
-            }
-
             let status = aci_gap_add_devices_to_list(
-                count,
-                entries.as_ptr() as *const ListEntry,
-                GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS,
+                0,
+                core::ptr::null(),
+                GAP_ADD_DEV_MODE_CLEAR_BOTH_FROM_SDB,
             );
             if status != BLE_STATUS_SUCCESS {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
-            Ok(count as usize)
+            Ok((num as usize).min(MAX_BONDED))
         }
     }
 
