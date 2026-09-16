@@ -457,8 +457,16 @@ pub enum PairingStatus {
     Success = 0x00,
     /// Pairing timed out
     Timeout = 0x01,
-    /// Pairing failed
+    /// Pairing failed. The pairing-complete `Reason` field is only meaningful for
+    /// this status.
     Failed = 0x02,
+    /// Encryption failed.
+    ///
+    /// This is what a bonded peer that cannot be encrypted reports, so it must be
+    /// distinguished from [`Self::Failed`]: it means the link key was rejected or
+    /// could not be found rather than that pairing was negotiated and refused. The
+    /// `Reason` field does not apply and holds no useful value here.
+    EncryptionFailed = 0x03,
 }
 
 impl PairingStatus {
@@ -467,6 +475,7 @@ impl PairingStatus {
         match value {
             0x00 => Self::Success,
             0x01 => Self::Timeout,
+            0x03 => Self::EncryptionFailed,
             _ => Self::Failed,
         }
     }
