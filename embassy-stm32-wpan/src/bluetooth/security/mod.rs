@@ -835,6 +835,46 @@ impl SecurityManager {
         }
     }
 
+    /// Run [`check_bonded_device`](Self::check_bonded_device) against every bonded
+    /// peer's own identity address (debug).
+    ///
+    /// This is the positive control for the RPA lookups: an identity address that
+    /// `aci_gap_get_bonded_devices` just returned needs neither an IRK nor any
+    /// crypto to match, so success is the only sane outcome. A failure here means
+    /// the command is unusable and its verdict on RPAs carries no information.
+    #[cfg(feature = "defmt")]
+    pub fn log_check_bonded_identities(&self) {
+        const MAX_BONDED: usize = 16;
+        let mut entries = [BondedDeviceEntry {
+            address_type: 0,
+            address: [0; 6],
+        }; MAX_BONDED];
+        let mut num: u8 = 0;
+
+        unsafe {
+            if aci_gap_get_bonded_devices(&mut num, entries.as_mut_ptr()) != BLE_STATUS_SUCCESS {
+                return;
+            }
+        }
+
+        for i in 0..(num as usize).min(MAX_BONDED) {
+            let e = &entries[i];
+            match self.check_bonded_device(e.address_type, &e.address) {
+                Some((id_type, id)) => info!(
+                    "  check_bonded_device(identity[{}]) OK -> type={} {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                    i, id_type, id[5], id[4], id[3], id[2], id[1], id[0]
+                ),
+                None => warn!(
+                    "  check_bonded_device(identity[{}]) FAILED -- probe is unreliable",
+                    i
+                ),
+            }
+        }
+    }
+
+    #[cfg(not(feature = "defmt"))]
+    pub fn log_check_bonded_identities(&self) {}
+
     /// Check if a device is bonded
     pub fn is_device_bonded(&self, address_type: IdentityAddressType, address: &[u8; 6]) -> Result<bool, BleError> {
         unsafe {
