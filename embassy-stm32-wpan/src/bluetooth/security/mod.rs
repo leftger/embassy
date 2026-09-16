@@ -909,8 +909,8 @@ impl SecurityManager {
         self.configure_filter_accept_list()
     }
 
-    /// Rebuild the controller's resolving list and Filter Accept List from the
-    /// bonds currently in the security database.
+    /// Rebuild the controller's resolving list from the bonds currently in the
+    /// security database, and clear the Filter Accept List.
     ///
     /// Modelled on ST `BLE_Privacy_Peripheral` `configure_filter_and_resolving_list()`,
     /// but clear-then-rebuild rather than append, which makes it idempotent: one
@@ -932,15 +932,27 @@ impl SecurityManager {
     /// Must NOT be called while advertising, scanning, or initiating is active.
     /// Returns the number of bonds programmed.
     pub fn configure_filter_and_resolving_list(&self) -> Result<usize, BleError> {
-        // Mode 0x04 appends to both lists, which is safe here because both were
-        // just cleared. ST mode 0x05 (clear+set) leaves peer_irk=0 on the basic stack.
+        // Mode 0x01 clears and repopulates the resolving list *only*, deliberately
+        // leaving the Filter Accept List empty.
+        //
+        // Populating the FAL as well (mode 0x04, which ST's reference uses) is a
+        // trap for a peripheral that advertises to phones: the FAL is matched
+        // against the peer's *resolved* identity, so the moment resolution fails
+        // for any reason the phone that owns the only bond is filtered out and
+        // cannot scan or connect. That turns a resolution problem into a total
+        // lockout, and it only bites after the first bond -- before that the FAL
+        // is empty and everything works. An empty FAL cannot filter anyone, so
+        // resolution becomes a pure optimisation rather than a gate.
+        //
+        // ST gets away with 0x04 because BLE_Privacy_Peripheral then advertises
+        // with HCI_SCAN_FILTER_ACC_LIST_USED_EXT on purpose; it *wants* the gate.
         //
         // Do not "simplify" this to one of the bonded-devices modes (0x08..=0x0D)
         // that clear and repopulate from the stack's own bond database: the basic
         // stack rejects them outright, with or without a zero Num_of_List_Entries,
         // and the whole call then fails so nothing is programmed and address
-        // resolution stays off. ST's own reference uses 0x04 for the same reason.
-        const GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS: u8 = 0x04;
+        // resolution stays off.
+        const GAP_ADD_DEV_MODE_CLEAR_AND_SET_RESOLVING_LIST: u8 = 0x01;
 
         const MAX_BONDED: usize = 16;
         let mut entries = [BondedDeviceEntry {
@@ -988,7 +1000,7 @@ impl SecurityManager {
             let status = aci_gap_add_devices_to_list(
                 count,
                 entries.as_ptr() as *const ListEntry,
-                GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS,
+                GAP_ADD_DEV_MODE_CLEAR_AND_SET_RESOLVING_LIST,
             );
             if status != BLE_STATUS_SUCCESS {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));

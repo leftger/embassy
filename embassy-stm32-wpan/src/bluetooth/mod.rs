@@ -1014,8 +1014,15 @@ impl<'d, M: Mode> HCI<'d, M> {
         use stm32wb_hci::host::uart::UartHci;
 
         loop {
-            if let Ok(Packet::Event(event)) = self.controller.read_packet().await {
-                return event;
+            match self.controller.read_packet().await {
+                Ok(Packet::Event(event)) => return event,
+                // Anything that fails to parse used to be dropped here without a
+                // trace, which hides the failures that matter most: an unparsable
+                // LE Enhanced Connection Complete means the link is up in the
+                // controller but the application never learns about it, so the
+                // peer sits at "connecting" until it times out with nothing
+                // logged on this side.
+                Err(_) => error!("HCI packet dropped: read or parse failed"),
             }
         }
     }
