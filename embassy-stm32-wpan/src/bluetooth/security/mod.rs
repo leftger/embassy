@@ -98,6 +98,12 @@ unsafe extern "C" {
     #[link_name = "ACI_GAP_CONFIGURE_FILTER_ACCEPT_LIST"]
     fn aci_gap_configure_filter_accept_list() -> tBleStatus;
 
+    #[link_name = "HCI_LE_CLEAR_RESOLVING_LIST"]
+    fn hci_le_clear_resolving_list() -> tBleStatus;
+
+    #[link_name = "HCI_LE_CLEAR_FILTER_ACCEPT_LIST"]
+    fn hci_le_clear_filter_accept_list() -> tBleStatus;
+
     #[link_name = "HCI_LE_SET_PRIVACY_MODE"]
     fn hci_le_set_privacy_mode(
         peer_identity_address_type: u8,
@@ -719,6 +725,43 @@ impl SecurityManager {
             } else {
                 Err(BleError::CommandFailed(Status::from_u8(status)))
             }
+        }
+    }
+
+    /// Drop the controller-side copies of every bond: address resolution, the
+    /// resolving list and the Filter Accept List.
+    ///
+    /// [`clear_security_database`](Self::clear_security_database) only empties
+    /// the host bond database. The controller keeps its own IRK table, accept
+    /// list and per-peer privacy modes, and
+    /// [`configure_filter_and_resolving_list`](Self::configure_filter_and_resolving_list)
+    /// returns early once the database is empty, so nothing ever tells the
+    /// controller to forget them. Call this alongside `clear_security_database`
+    /// to leave the stack in the same state a reset would.
+    ///
+    /// Address resolution is disabled first because the Core Spec forbids
+    /// clearing the resolving list while translation is enabled and the radio is
+    /// active (Vol 4, Part E, 7.8.40).
+    ///
+    /// Must NOT be called while advertising, scanning, or initiating is active.
+    pub fn clear_bond_lists(&self) -> Result<(), BleError> {
+        unsafe {
+            let status = hci_le_set_address_resolution_enable(0);
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
+            }
+
+            let status = hci_le_clear_resolving_list();
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
+            }
+
+            let status = hci_le_clear_filter_accept_list();
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
+            }
+
+            Ok(())
         }
     }
 
