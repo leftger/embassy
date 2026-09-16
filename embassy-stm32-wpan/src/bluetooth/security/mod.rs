@@ -81,6 +81,12 @@ unsafe extern "C" {
     #[link_name = "ACI_GAP_IS_DEVICE_BONDED"]
     fn aci_gap_is_device_bonded(peer_identity_address_type: u8, peer_identity_address: *const u8) -> tBleStatus;
 
+    #[link_name = "ACI_GAP_PAIRING_REQUEST_REPLY"]
+    fn aci_gap_pairing_request_reply(connection_handle: u16, accept: u8) -> tBleStatus;
+
+    #[link_name = "ACI_HAL_WRITE_CONFIG_DATA"]
+    fn aci_hal_write_config_data(offset: u8, length: u8, value: *const u8) -> tBleStatus;
+
     #[link_name = "ACI_GAP_CHECK_BONDED_DEVICE"]
     fn aci_gap_check_bonded_device(
         peer_address_type: u8,
@@ -386,8 +392,16 @@ pub enum SecurityEvent {
     NumericComparisonRequest { conn_handle: u16, numeric_value: u32 },
     /// Bond lost event - need to allow rebond via allow_rebond()
     BondLost { conn_handle: u16 },
-    /// Pairing request received (when using SMP mode bit 3)
-    PairingRequest { conn_handle: u16, is_bonded: bool },
+    /// Pairing request received (when using SMP mode bit 3).
+    ///
+    /// `auth_req` is the raw AuthReq octet from the peer's Pairing Request or
+    /// Security Request (Core Spec Vol 3, Part H, 3.5.1): bit 0-1 bonding flags,
+    /// bit 2 MITM, bit 3 SC, bit 4 keypress.
+    PairingRequest {
+        conn_handle: u16,
+        is_bonded: bool,
+        auth_req: u8,
+    },
     /// Application authorization response is required.
     AuthorizationRequest { conn_handle: u16 },
     /// Peripheral-side security procedure has started successfully.
@@ -399,6 +413,31 @@ pub enum SecurityEvent {
         conn_handle: u16,
         notification_type: KeypressNotificationType,
     },
+}
+
+/// Flags for [`SecurityManager::set_smp_mode`] (`CONFIG_DATA_SMP_MODE`).
+pub struct SmpMode;
+
+impl SmpMode {
+    /// Deactivate the SMP; controller events that would go to it are passed
+    /// straight to the application.
+    pub const BYPASS: u8 = 0x01;
+    /// Disable the "Repeated Attempts" protection.
+    pub const NO_BLACKLIST: u8 = 0x02;
+    /// Forbid the peer from using the standard Secure Connections debug key.
+    pub const NO_PEER_DEBUG_KEY: u8 = 0x04;
+    /// Deliver [`SecurityEvent::PairingRequest`] on an incoming Pairing Request
+    /// or Security Request. Requires the application to answer with
+    /// [`SecurityManager::pairing_request_reply`].
+    pub const PAIRING_REQUEST_EVENT: u8 = 0x08;
+    /// Forbid the Just Works association model.
+    pub const NO_JUST_WORKS: u8 = 0x10;
+    /// Forbid the Passkey Entry association model.
+    pub const NO_PASSKEY_ENTRY: u8 = 0x20;
+    /// Forbid the Out of Band association model.
+    pub const NO_OOB: u8 = 0x40;
+    /// Forbid the Numeric Comparison association model.
+    pub const NO_NUMERIC_COMPARISON: u8 = 0x80;
 }
 
 /// Convert an STM32 vendor-specific event into a high-level security event.
@@ -435,6 +474,7 @@ pub fn from_vendor_event(event: &VendorEvent) -> Option<SecurityEvent> {
         VendorEvent::GapPairingRequest(e) => Some(SecurityEvent::PairingRequest {
             conn_handle: e.connection_handle.0,
             is_bonded: e.bonded,
+            auth_req: e.auth_req,
         }),
         VendorEvent::GapAuthorizationRequest(conn_handle) => Some(SecurityEvent::AuthorizationRequest {
             conn_handle: conn_handle.0,
@@ -799,6 +839,37 @@ impl SecurityManager {
             } else {
                 Err(BleError::CommandFailed(Status::from_u8(status)))
             }
+        }
+    }
+
+    /// Set the host's SMP mode bitmap (`CONFIG_DATA_SMP_MODE_OFFSET`).
+    ///
+    /// Must be called before pairing starts. See [`SmpMode`] for the flags.
+    /// Note that setting [`SmpMode::PAIRING_REQUEST_EVENT`] makes the stack wait
+    /// for [`pairing_request_reply`](Self::pairing_request_reply) on every
+    /// incoming Pairing Request, so the application must handle
+    /// [`SecurityEvent::PairingRequest`] or pairing will stall.
+    pub fn set_smp_mode(&self, mode: u8) -> Result<(), BleError> {
+        const CONFIG_DATA_SMP_MODE_OFFSET: u8 = 0xB0;
+
+        let status = unsafe { aci_hal_write_config_data(CONFIG_DATA_SMP_MODE_OFFSET, 1, &mode) };
+        if status == BLE_STATUS_SUCCESS {
+            Ok(())
+        } else {
+            Err(BleError::CommandFailed(Status::from_u8(status)))
+        }
+    }
+
+    /// Accept or reject an incoming Pairing Request or Security Request.
+    ///
+    /// Required response to [`SecurityEvent::PairingRequest`], which is only
+    /// delivered when [`SmpMode::PAIRING_REQUEST_EVENT`] is set.
+    pub fn pairing_request_reply(&self, conn_handle: u16, accept: bool) -> Result<(), BleError> {
+        let status = unsafe { aci_gap_pairing_request_reply(conn_handle, accept as u8) };
+        if status == BLE_STATUS_SUCCESS {
+            Ok(())
+        } else {
+            Err(BleError::CommandFailed(Status::from_u8(status)))
         }
     }
 
