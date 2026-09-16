@@ -139,8 +139,33 @@ pub mod ble_config {
     pub const CFG_BLE_EATT_BEARER_PER_LINK: u8 = 0;
     /// NVM maximum size (in 64-bit words)
     pub const CFG_BLE_NVM_SIZE_MAX: u16 = 256;
-    /// BLE options
-    pub const CFG_BLE_OPTIONS: u16 = 0x0D; // DEV_NAME_READ_ONLY | REDUCED_DB_IN_NVM | CS_ALGO_2
+    /// ST's `BLE_OPTIONS_*` flags for [`BleStack_init_t::options`] (ble_defs.h).
+    #[allow(dead_code)]
+    pub mod ble_options {
+        /// Link Layer only: brings up no host stack, so GAP and GATT commands are
+        /// all rejected with 0x0C. Never set this for a GAP application.
+        pub const LL_ONLY: u16 = 0x0001;
+        pub const NO_SVC_CHANGE_DESC: u16 = 0x0002;
+        pub const DEV_NAME_READ_ONLY: u16 = 0x0004;
+        pub const EXTENDED_ADV: u16 = 0x0008;
+        pub const CS_ALGO_2: u16 = 0x0010;
+        pub const REDUCED_DB_IN_NVM: u16 = 0x0020;
+        pub const GATT_CACHING: u16 = 0x0040;
+        pub const POWER_CLASS_1: u16 = 0x0080;
+        pub const APPEARANCE_WRITABLE: u16 = 0x0100;
+        pub const ENHANCED_ATT: u16 = 0x0200;
+    }
+
+    /// BLE options.
+    ///
+    /// This was previously the literal `0x0D`, commented as
+    /// "DEV_NAME_READ_ONLY | REDUCED_DB_IN_NVM | CS_ALGO_2" — but those three
+    /// flags are `0x34`. `0x0D` actually decodes to `LL_ONLY | DEV_NAME_READ_ONLY
+    /// | EXTENDED_ADV`, so the stack was asked for a Link-Layer-only build. The
+    /// basic stack library ignores that bit, which is why it went unnoticed; the
+    /// full stack honours it and refuses every `aci_gap_*` command with 0x0C
+    /// (HCI_COMMAND_DISALLOWED), leaving the radio unable to advertise.
+    pub const CFG_BLE_OPTIONS: u16 = ble_options::DEV_NAME_READ_ONLY | ble_options::EXTENDED_ADV;
 
     // Memory block size (from ble_bufsize.h)
     const BLE_MEM_BLOCK_SIZE: usize = 32;
