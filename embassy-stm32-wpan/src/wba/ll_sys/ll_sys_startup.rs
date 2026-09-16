@@ -160,6 +160,12 @@ pub mod ble_config {
         pub const LL_ONLY: u16 = 0x0001;
         pub const NO_SVC_CHANGE_DESC: u16 = 0x0002;
         pub const DEV_NAME_READ_ONLY: u16 = 0x0004;
+        /// Switches the stack to extended advertising, which *disables* the legacy
+        /// advertising commands. Do not set this: this crate only wraps the legacy
+        /// ones (`aci_gap_set_discoverable` and
+        /// `aci_gap_set_undirected_connectable`), and both are rejected with 0x0C
+        /// while it is on. Enabling it would require wrapping
+        /// `aci_gap_adv_set_configuration` / `aci_gap_adv_set_enable` instead.
         pub const EXTENDED_ADV: u16 = 0x0008;
         pub const CS_ALGO_2: u16 = 0x0010;
         pub const REDUCED_DB_IN_NVM: u16 = 0x0020;
@@ -174,11 +180,16 @@ pub mod ble_config {
     /// This was previously the literal `0x0D`, commented as
     /// "DEV_NAME_READ_ONLY | REDUCED_DB_IN_NVM | CS_ALGO_2" — but those three
     /// flags are `0x34`. `0x0D` actually decodes to `LL_ONLY | DEV_NAME_READ_ONLY
-    /// | EXTENDED_ADV`, so the stack was asked for a Link-Layer-only build. The
-    /// basic stack library ignores that bit, which is why it went unnoticed; the
-    /// full stack honours it and refuses every `aci_gap_*` command with 0x0C
-    /// (HCI_COMMAND_DISALLOWED), leaving the radio unable to advertise.
-    pub const CFG_BLE_OPTIONS: u16 = ble_options::DEV_NAME_READ_ONLY | ble_options::EXTENDED_ADV;
+    /// | EXTENDED_ADV`, and both of those extra bits are wrong here: `LL_ONLY`
+    /// asks for a build with no host stack, and `EXTENDED_ADV` disables the legacy
+    /// advertising commands this crate is built on. Either one leaves every
+    /// advertising attempt rejected with 0x0C (HCI_COMMAND_DISALLOWED).
+    ///
+    /// The basic stack library ignores both bits, which is why `0x0D` appeared to
+    /// work; the full stack honours them. ST's own `BLE_Privacy_Peripheral`, which
+    /// is the reference for the legacy + controller-privacy flow, ships
+    /// `CFG_BLE_OPTIONS = 0`.
+    pub const CFG_BLE_OPTIONS: u16 = ble_options::DEV_NAME_READ_ONLY;
 
     // Memory block size (from ble_bufsize.h)
     const BLE_MEM_BLOCK_SIZE: usize = 32;
