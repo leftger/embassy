@@ -511,6 +511,50 @@ impl<'d> HCI<'d, Normal> {
         )
     }
 
+    /// Ask the central to change the connection parameters, from the peripheral role.
+    ///
+    /// [`update_connection_params`](Self::update_connection_params) issues
+    /// `HCI_LE_Connection_Update`, which is a central-role command; a peripheral
+    /// has to route the request through L2CAP instead. This is the call ST's
+    /// reference peripherals use for their connection-parameter-update button
+    /// (`aci_l2cap_connection_parameter_update_req`).
+    ///
+    /// The central answers asynchronously with an L2CAP connection update
+    /// response, and applies the new parameters only if it accepts them.
+    ///
+    /// # Parameters
+    ///
+    /// - `handle`: Connection handle
+    /// - `interval_min`: Minimum connection interval (units of 1.25ms)
+    /// - `interval_max`: Maximum connection interval (units of 1.25ms)
+    /// - `latency`: Peripheral latency, in connection events
+    /// - `timeout_multiplier`: Supervision timeout (units of 10ms)
+    pub fn request_connection_params(
+        &self,
+        handle: ConnectionHandle,
+        interval_min: u16,
+        interval_max: u16,
+        latency: u16,
+        timeout_multiplier: u16,
+    ) -> Result<(), BleError> {
+        unsafe {
+            let status = stm32_bindings::ble::aci_l2cap_connection_parameter_update_req(
+                handle.0,
+                interval_min,
+                interval_max,
+                latency,
+                timeout_multiplier,
+            );
+            if status == 0 {
+                Ok(())
+            } else {
+                Err(BleError::CommandFailed(crate::bluetooth::hci::types::Status::from_u8(
+                    status,
+                )))
+            }
+        }
+    }
+
     /// Read the current PHY for a connection
     ///
     /// # Returns
