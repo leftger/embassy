@@ -960,11 +960,20 @@ impl SecurityManager {
         //
         // For the same reason there is no HCI_LE_Set_Privacy_Mode loop here.
         //
-        // Do not "simplify" this to one of the bonded-devices modes (0x08..=0x0D)
-        // that clear and repopulate from the stack's own bond database: the basic
-        // stack rejects them outright, with or without a zero Num_of_List_Entries,
-        // and the whole call then fails so nothing is programmed.
+        // The mode families are not interchangeable. Modes 0x00..=0x05 add "the
+        // devices provided as parameters", and a List_Entry_t is just an address
+        // type plus an address, so those entries land in the resolving list with an
+        // all-zero peer IRK. The controller then cannot resolve a reconnecting
+        // phone's RPA: SMP finds no LTK for it, pairing fails with 0x06 and the user
+        // is asked to confirm a fresh passkey on every reconnect. A resolving list
+        // entry whose peer IRK is missing also reads its identity address back from
+        // HCI_LE_Read_Peer_Resolvable_Address, which is how to spot this.
+        //
+        // Modes 0x08..=0x0D add "the bonded devices", sourced from the security
+        // database, which is what carries the IRKs. Only the basic stack rejects
+        // them, so try 0x0D and keep ST's 0x04 as a fallback.
         const GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS: u8 = 0x04;
+        const GAP_ADD_DEV_MODE_CLEAR_AND_ADD_BONDED_BOTH_LISTS: u8 = 0x0D;
 
         const MAX_BONDED: usize = 16;
         let mut entries = [BondedDeviceEntry {
@@ -983,6 +992,29 @@ impl SecurityManager {
             if count == 0 {
                 return Ok(0);
             }
+
+            // Prefer the bonded-devices mode: it is the only family that sources
+            // entries from the security database, so each resolving list entry gets
+            // the peer's IRK along with its identity address. Num_of_List_Entries is
+            // zero because we are asking for the bond database, not a supplied list.
+            let status = aci_gap_add_devices_to_list(
+                0,
+                entries.as_ptr() as *const ListEntry,
+                GAP_ADD_DEV_MODE_CLEAR_AND_ADD_BONDED_BOTH_LISTS,
+            );
+            if status == BLE_STATUS_SUCCESS {
+                return Ok(count as usize);
+            }
+
+            // Older/basic stack builds reject 0x08..=0x0D outright. Fall back to
+            // ST's supplied-list mode so advertising still comes up with a
+            // populated Filter Accept List, but say so: without the peer IRK the
+            // controller cannot resolve a reconnecting phone's RPA, SMP finds no
+            // LTK, and the phone is forced to pair again.
+            warn!(
+                "add_devices_to_list mode 0x{:02X} rejected (0x{:02X}); falling back to 0x{:02X}, bonded reconnect will not resolve peer RPAs",
+                GAP_ADD_DEV_MODE_CLEAR_AND_ADD_BONDED_BOTH_LISTS, status, GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS
+            );
 
             let status = aci_gap_add_devices_to_list(
                 count,
