@@ -1180,6 +1180,34 @@ impl SecurityManager {
         }
     }
 
+    /// Whether `address` belongs to a peer already in the bond database.
+    ///
+    /// Pass the address reported by the connection-complete event. Once address
+    /// resolution is working the controller reports a bonded peer's *identity*
+    /// address there, so it can be compared against the bond database directly.
+    ///
+    /// Useful for deciding whether to send a peripheral security request: a peer
+    /// that is already bonded will start encryption from its own side, and asking
+    /// it to authenticate again is what ST's reference deliberately avoids.
+    pub fn is_bonded_address(&self, address_type: u8, address: &[u8; 6]) -> bool {
+        const MAX_BONDED: usize = 16;
+        let mut entries = [BondedDeviceEntry {
+            address_type: 0,
+            address: [0; 6],
+        }; MAX_BONDED];
+        let mut num: u8 = 0;
+
+        unsafe {
+            if aci_gap_get_bonded_devices(&mut num, entries.as_mut_ptr()) != BLE_STATUS_SUCCESS {
+                return false;
+            }
+
+            entries[..(num as usize).min(MAX_BONDED)]
+                .iter()
+                .any(|e| e.address_type == address_type && &e.address == address)
+        }
+    }
+
     /// Append bonded peers to resolving list + FAL (ST mode `0x04`).
     ///
     /// Used after disconnect in `BLE_Privacy_Peripheral` before RPA advertising.
