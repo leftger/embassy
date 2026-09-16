@@ -98,6 +98,12 @@ unsafe extern "C" {
     #[link_name = "ACI_GAP_CONFIGURE_FILTER_ACCEPT_LIST"]
     fn aci_gap_configure_filter_accept_list() -> tBleStatus;
 
+    #[link_name = "HCI_LE_CLEAR_RESOLVING_LIST"]
+    fn hci_le_clear_resolving_list() -> tBleStatus;
+
+    #[link_name = "HCI_LE_CLEAR_FILTER_ACCEPT_LIST"]
+    fn hci_le_clear_filter_accept_list() -> tBleStatus;
+
     #[link_name = "HCI_LE_SET_PRIVACY_MODE"]
     fn hci_le_set_privacy_mode(
         peer_identity_address_type: u8,
@@ -722,6 +728,43 @@ impl SecurityManager {
         }
     }
 
+    /// Drop the controller-side copies of every bond: address resolution, the
+    /// resolving list and the Filter Accept List.
+    ///
+    /// [`clear_security_database`](Self::clear_security_database) only empties
+    /// the host bond database. The controller keeps its own IRK table, accept
+    /// list and per-peer privacy modes, and
+    /// [`configure_filter_and_resolving_list`](Self::configure_filter_and_resolving_list)
+    /// returns early once the database is empty, so nothing ever tells the
+    /// controller to forget them. Call this alongside `clear_security_database`
+    /// to leave the stack in the same state a reset would.
+    ///
+    /// Address resolution is disabled first because the Core Spec forbids
+    /// clearing the resolving list while translation is enabled and the radio is
+    /// active (Vol 4, Part E, 7.8.40).
+    ///
+    /// Must NOT be called while advertising, scanning, or initiating is active.
+    pub fn clear_bond_lists(&self) -> Result<(), BleError> {
+        unsafe {
+            let status = hci_le_set_address_resolution_enable(0);
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
+            }
+
+            let status = hci_le_clear_resolving_list();
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
+            }
+
+            let status = hci_le_clear_filter_accept_list();
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
+            }
+
+            Ok(())
+        }
+    }
+
     /// Remove a specific bonded device
     pub fn remove_bonded_device(&self, address_type: IdentityAddressType, address: &[u8; 6]) -> Result<(), BleError> {
         unsafe {
@@ -812,6 +855,18 @@ impl SecurityManager {
             }
 
             if num == 0 {
+                // Clear rather than return: leaving the previous entries in place
+                // would keep the controller resolving against IRKs whose bonds are
+                // gone. Translation must be off to mutate the list, and with no
+                // bonds there is nothing to resolve against anyway.
+                let status = hci_le_set_address_resolution_enable(0);
+                if status != BLE_STATUS_SUCCESS {
+                    return Err(BleError::CommandFailed(Status::from_u8(status)));
+                }
+                let status = hci_le_clear_resolving_list();
+                if status != BLE_STATUS_SUCCESS {
+                    return Err(BleError::CommandFailed(Status::from_u8(status)));
+                }
                 return Ok(0);
             }
 
@@ -854,18 +909,32 @@ impl SecurityManager {
         self.configure_filter_accept_list()
     }
 
-    /// Clear and repopulate both the Filter Accept List and resolving list from
-    /// bonded devices (`aci_gap_add_devices_to_list` mode `0x04` = append both).
+    /// Rebuild the controller's resolving list and Filter Accept List from the
+    /// bonds currently in the security database.
     ///
-    /// Matches ST `BLE_Privacy_Peripheral` `configure_filter_and_resolving_list()`.
-    /// The stack looks up peer IRKs from the bond database for each identity
-    /// address in `List_Entry`.
+    /// Modelled on ST `BLE_Privacy_Peripheral` `configure_filter_and_resolving_list()`,
+    /// but clear-then-rebuild rather than append, which makes it idempotent: one
+    /// call brings the controller in line with the database from any prior state.
+    /// Zero bonds therefore leaves both lists empty and address resolution off,
+    /// matching a freshly reset controller.
+    ///
+    /// Appending instead (and returning early when the database is empty, as
+    /// this used to) strands entries in the controller after the bonds that
+    /// created them are gone — so a peripheral that cleared its bonds at runtime
+    /// needed a hardware reset before it could bond again — and can duplicate a
+    /// peer across calls in a list that is typically only eight entries deep.
+    ///
+    /// The two clears run with address resolution disabled because the Core Spec
+    /// forbids mutating the resolving list while translation is enabled
+    /// (Vol 4, Part E, 7.8.40). Resolution is then re-enabled before the add,
+    /// which is the order ST's reference uses.
     ///
     /// Must NOT be called while advertising, scanning, or initiating is active.
+    /// Returns the number of bonds programmed.
     pub fn configure_filter_and_resolving_list(&self) -> Result<usize, BleError> {
-        // ST reference BLE_Privacy_Peripheral uses mode 0x04 (append). Mode 0x05 (clear+set)
-        // appears to leave peer_irk=0 on the basic stack.
-        const GAP_ADD_DEV_MODE_CLEAR_BOTH_LISTS: u8 = 0x04;
+        // Mode 0x04 appends to both lists, which is safe here because both were
+        // just cleared. ST mode 0x05 (clear+set) leaves peer_irk=0 on the basic stack.
+        const GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS: u8 = 0x04;
 
         const MAX_BONDED: usize = 16;
         let mut entries = [BondedDeviceEntry {
@@ -880,11 +949,29 @@ impl SecurityManager {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
-            if num == 0 {
-                return Ok(0);
+            // Drop whatever the controller is holding before rebuilding, with
+            // translation off so the list may be mutated.
+            let status = hci_le_set_address_resolution_enable(0);
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
+            }
+
+            let status = hci_le_clear_resolving_list();
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
+            }
+
+            let status = hci_le_clear_filter_accept_list();
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
             let count = (num as usize).min(MAX_BONDED) as u8;
+            if count == 0 {
+                // Nothing to resolve against, so leave resolution off rather
+                // than translating against an empty list.
+                return Ok(0);
+            }
 
             // Enable resolution before programming the list (ST privacy peripheral order).
             let status = hci_le_set_address_resolution_enable(1);
@@ -895,7 +982,7 @@ impl SecurityManager {
             let status = aci_gap_add_devices_to_list(
                 count,
                 entries.as_ptr() as *const ListEntry,
-                GAP_ADD_DEV_MODE_CLEAR_BOTH_LISTS,
+                GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS,
             );
             if status != BLE_STATUS_SUCCESS {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
