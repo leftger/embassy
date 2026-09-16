@@ -82,9 +82,6 @@ unsafe extern "C" {
     #[link_name = "ACI_GAP_IS_DEVICE_BONDED"]
     fn aci_gap_is_device_bonded(peer_identity_address_type: u8, peer_identity_address: *const u8) -> tBleStatus;
 
-    #[link_name = "ACI_GAP_RESOLVE_PRIVATE_ADDR"]
-    fn aci_gap_resolve_private_addr(address: *const u8, actual_address: *mut u8) -> tBleStatus;
-
     #[link_name = "HCI_LE_SET_ADDRESS_RESOLUTION_ENABLE"]
     fn hci_le_set_address_resolution_enable(enable: u8) -> tBleStatus;
 
@@ -805,24 +802,6 @@ impl SecurityManager {
 
             // BLE_STATUS_SUCCESS means bonded, error code 0x42 means not bonded
             Ok(status == BLE_STATUS_SUCCESS)
-        }
-    }
-
-    /// Resolve a resolvable private address against the IRKs held in the security database.
-    ///
-    /// This reads the security records out of the NVM cache, so it reports whether the host
-    /// actually holds a usable peer IRK for `rpa` — independent of any controller-side
-    /// resolving list. Returns the peer's identity address on success.
-    pub fn resolve_private_addr(&self, rpa: &[u8; 6]) -> Result<[u8; 6], BleError> {
-        unsafe {
-            let mut identity = [0u8; 6];
-            let status = aci_gap_resolve_private_addr(rpa.as_ptr(), identity.as_mut_ptr());
-
-            if status == BLE_STATUS_SUCCESS {
-                Ok(identity)
-            } else {
-                Err(BleError::CommandFailed(Status::from_u8(status)))
-            }
         }
     }
 
