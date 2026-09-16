@@ -31,7 +31,6 @@ use crate::bluetooth::hci::types::Status;
 #[allow(non_camel_case_types)]
 type tBleStatus = u8;
 
-#[link(name = "stm32wba_ble_stack_basic")]
 unsafe extern "C" {
     #[link_name = "ACI_GAP_SET_IO_CAPABILITY"]
     fn aci_gap_set_io_capability(io_capability: u8) -> tBleStatus;
@@ -81,6 +80,17 @@ unsafe extern "C" {
 
     #[link_name = "ACI_GAP_IS_DEVICE_BONDED"]
     fn aci_gap_is_device_bonded(peer_identity_address_type: u8, peer_identity_address: *const u8) -> tBleStatus;
+
+    #[link_name = "ACI_HAL_WRITE_CONFIG_DATA"]
+    fn aci_hal_write_config_data(offset: u8, length: u8, value: *const u8) -> tBleStatus;
+
+    #[link_name = "ACI_GAP_CHECK_BONDED_DEVICE"]
+    fn aci_gap_check_bonded_device(
+        peer_address_type: u8,
+        peer_address: *const u8,
+        id_address_type: *mut u8,
+        id_address: *mut u8,
+    ) -> tBleStatus;
 
     #[link_name = "HCI_LE_SET_ADDRESS_RESOLUTION_ENABLE"]
     fn hci_le_set_address_resolution_enable(enable: u8) -> tBleStatus;
@@ -379,8 +389,16 @@ pub enum SecurityEvent {
     NumericComparisonRequest { conn_handle: u16, numeric_value: u32 },
     /// Bond lost event - need to allow rebond via allow_rebond()
     BondLost { conn_handle: u16 },
-    /// Pairing request received (when using SMP mode bit 3)
-    PairingRequest { conn_handle: u16, is_bonded: bool },
+    /// Pairing request received (when using SMP mode bit 3).
+    ///
+    /// `auth_req` is the raw AuthReq octet from the peer's Pairing Request or
+    /// Security Request (Core Spec Vol 3, Part H, 3.5.1): bit 0-1 bonding flags,
+    /// bit 2 MITM, bit 3 SC, bit 4 keypress.
+    PairingRequest {
+        conn_handle: u16,
+        is_bonded: bool,
+        auth_req: u8,
+    },
     /// Application authorization response is required.
     AuthorizationRequest { conn_handle: u16 },
     /// Peripheral-side security procedure has started successfully.
@@ -392,6 +410,31 @@ pub enum SecurityEvent {
         conn_handle: u16,
         notification_type: KeypressNotificationType,
     },
+}
+
+/// Flags for [`SecurityManager::set_smp_mode`] (`CONFIG_DATA_SMP_MODE`).
+pub struct SmpMode;
+
+impl SmpMode {
+    /// Deactivate the SMP; controller events that would go to it are passed
+    /// straight to the application.
+    pub const BYPASS: u8 = 0x01;
+    /// Disable the "Repeated Attempts" protection.
+    pub const NO_BLACKLIST: u8 = 0x02;
+    /// Forbid the peer from using the standard Secure Connections debug key.
+    pub const NO_PEER_DEBUG_KEY: u8 = 0x04;
+    /// Deliver [`SecurityEvent::PairingRequest`] on an incoming Pairing Request
+    /// or Security Request. Requires the application to answer with
+    /// [`SecurityManager::pairing_request_reply`].
+    pub const PAIRING_REQUEST_EVENT: u8 = 0x08;
+    /// Forbid the Just Works association model.
+    pub const NO_JUST_WORKS: u8 = 0x10;
+    /// Forbid the Passkey Entry association model.
+    pub const NO_PASSKEY_ENTRY: u8 = 0x20;
+    /// Forbid the Out of Band association model.
+    pub const NO_OOB: u8 = 0x40;
+    /// Forbid the Numeric Comparison association model.
+    pub const NO_NUMERIC_COMPARISON: u8 = 0x80;
 }
 
 /// Convert an STM32 vendor-specific event into a high-level security event.
@@ -428,6 +471,7 @@ pub fn from_vendor_event(event: &VendorEvent) -> Option<SecurityEvent> {
         VendorEvent::GapPairingRequest(e) => Some(SecurityEvent::PairingRequest {
             conn_handle: e.connection_handle.0,
             is_bonded: e.bonded,
+            auth_req: e.auth_req,
         }),
         VendorEvent::GapAuthorizationRequest(conn_handle) => Some(SecurityEvent::AuthorizationRequest {
             conn_handle: conn_handle.0,
@@ -795,6 +839,97 @@ impl SecurityManager {
         }
     }
 
+    /// Set the host's SMP mode bitmap (`CONFIG_DATA_SMP_MODE_OFFSET`).
+    ///
+    /// Must be called before pairing starts. See [`SmpMode`] for the flags.
+    /// Note that setting [`SmpMode::PAIRING_REQUEST_EVENT`] makes the stack wait
+    /// for [`pairing_request_response`](Self::pairing_request_response) on every
+    /// incoming Pairing Request, so the application must handle
+    /// [`SecurityEvent::PairingRequest`] or pairing will stall.
+    pub fn set_smp_mode(&self, mode: u8) -> Result<(), BleError> {
+        const CONFIG_DATA_SMP_MODE_OFFSET: u8 = 0xB0;
+
+        let status = unsafe { aci_hal_write_config_data(CONFIG_DATA_SMP_MODE_OFFSET, 1, &mode) };
+        if status == BLE_STATUS_SUCCESS {
+            Ok(())
+        } else {
+            Err(BleError::CommandFailed(Status::from_u8(status)))
+        }
+    }
+
+    /// Look a peer up in the bonding table, resolving the address first when it
+    /// is a Resolvable Private Address.
+    ///
+    /// Unlike [`is_device_bonded`](Self::is_device_bonded), which needs the peer's
+    /// *identity* address and therefore fails for a peer that reconnects behind a
+    /// rotating RPA, this resolves the supplied address against every IRK in the
+    /// host's security database. It works even with privacy disabled.
+    ///
+    /// Returns the identity address the peer distributed during bonding, or `None`
+    /// if no IRK in the database matches.
+    ///
+    /// New in CubeWBA 1.10 (`ACI_GAP_CHECK_BONDED_DEVICE`); it is also what the
+    /// deprecated `ACI_GAP_RESOLVE_PRIVATE_ADDR` now forwards to.
+    pub fn check_bonded_device(&self, address_type: u8, address: &[u8; 6]) -> Option<(u8, [u8; 6])> {
+        let mut id_address_type: u8 = 0;
+        let mut id_address = [0u8; 6];
+
+        let status = unsafe {
+            aci_gap_check_bonded_device(
+                address_type,
+                address.as_ptr(),
+                &mut id_address_type,
+                id_address.as_mut_ptr(),
+            )
+        };
+
+        if status == BLE_STATUS_SUCCESS {
+            Some((id_address_type, id_address))
+        } else {
+            None
+        }
+    }
+
+    /// Run [`check_bonded_device`](Self::check_bonded_device) against every bonded
+    /// peer's own identity address (debug).
+    ///
+    /// This is the positive control for the RPA lookups: an identity address that
+    /// `aci_gap_get_bonded_devices` just returned needs neither an IRK nor any
+    /// crypto to match, so success is the only sane outcome. A failure here means
+    /// the command is unusable and its verdict on RPAs carries no information.
+    #[cfg(feature = "defmt")]
+    pub fn log_check_bonded_identities(&self) {
+        const MAX_BONDED: usize = 16;
+        let mut entries = [BondedDeviceEntry {
+            address_type: 0,
+            address: [0; 6],
+        }; MAX_BONDED];
+        let mut num: u8 = 0;
+
+        unsafe {
+            if aci_gap_get_bonded_devices(&mut num, entries.as_mut_ptr()) != BLE_STATUS_SUCCESS {
+                return;
+            }
+        }
+
+        for i in 0..(num as usize).min(MAX_BONDED) {
+            let e = &entries[i];
+            match self.check_bonded_device(e.address_type, &e.address) {
+                Some((id_type, id)) => info!(
+                    "  check_bonded_device(identity[{}]) OK -> type={} {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                    i, id_type, id[5], id[4], id[3], id[2], id[1], id[0]
+                ),
+                None => warn!(
+                    "  check_bonded_device(identity[{}]) FAILED -- probe is unreliable",
+                    i
+                ),
+            }
+        }
+    }
+
+    #[cfg(not(feature = "defmt"))]
+    pub fn log_check_bonded_identities(&self) {}
+
     /// Check if a device is bonded
     pub fn is_device_bonded(&self, address_type: IdentityAddressType, address: &[u8; 6]) -> Result<bool, BleError> {
         unsafe {
@@ -929,50 +1064,17 @@ impl SecurityManager {
     /// Rebuild the controller's resolving list from the bonds currently in the
     /// security database, and clear the Filter Accept List.
     ///
-    /// Modelled on ST `BLE_Privacy_Peripheral` `configure_filter_and_resolving_list()`,
-    /// but clear-then-rebuild rather than append, which makes it idempotent: one
-    /// call brings the controller in line with the database from any prior state.
-    /// Zero bonds therefore leaves both lists empty and address resolution off,
-    /// matching a freshly reset controller.
+    /// CubeWBA 1.10 mode 0x0D atomically clears both lists and repopulates them
+    /// from the security database. GAP therefore owns the full operation and
+    /// keeps its internal privacy state synchronized with the controller.
     ///
-    /// Appending instead (and returning early when the database is empty, as
-    /// this used to) strands entries in the controller after the bonds that
-    /// created them are gone — so a peripheral that cleared its bonds at runtime
-    /// needed a hardware reset before it could bond again — and can duplicate a
-    /// peer across calls in a list that is typically only eight entries deep.
-    ///
-    /// The two clears run with address resolution disabled because the Core Spec
-    /// forbids mutating the resolving list while translation is enabled
-    /// (Vol 4, Part E, 7.8.40). Resolution is then re-enabled before the add,
-    /// which is the order ST's reference uses.
+    /// Address resolution is then enabled iff at least one bond was programmed,
+    /// so the controller's translation state always matches the list contents.
     ///
     /// Must NOT be called while advertising, scanning, or initiating is active.
     /// Returns the number of bonds programmed.
     pub fn configure_filter_and_resolving_list(&self) -> Result<usize, BleError> {
-        // This mirrors ST's BLE_Privacy_Peripheral `configure_filter_and_resolving_list()`
-        // exactly: read the bonded identities, then hand them to GAP in one call.
-        //
-        // Mode 0x04 appends to both the resolving list and the Filter Accept List.
-        // Populating the FAL is harmless on its own -- it only gates traffic if the
-        // advertiser also passes a filter policy that consults it, and callers that
-        // want new peers to be able to connect simply keep the policy permissive.
-        //
-        // Everything else must be left to GAP. It is tempting to bracket this with
-        // HCI_LE_Set_Address_Resolution_Enable and clear the two lists first so the
-        // rebuild starts from a known state, but `aci_gap_init` with privacy 0x02
-        // makes GAP the owner of the resolving list and of the resolution enable
-        // flag. Driving them over raw HCI desynchronises GAP's view from the
-        // controller's, and the failure is silent and total: advertising still
-        // reports success and stays on the air with a valid RPA, yet the controller
-        // accepts no connection at all, so no HCI event is ever generated for the
-        // host to log. Scanners see the device and every connect attempt times out.
-        //
-        // For the same reason there is no HCI_LE_Set_Privacy_Mode loop here.
-        //
-        // A List_Entry_t is only an address type plus an address; the stack pairs
-        // each one with the IRK it already holds in the security database for that
-        // identity. That is why ST passes the bonded identities straight through.
-        const GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS: u8 = 0x04;
+        const GAP_ADD_DEV_MODE_CLEAR_BOTH_FROM_SDB: u8 = 0x0D;
 
         const MAX_BONDED: usize = 16;
         let mut entries = [BondedDeviceEntry {
@@ -987,21 +1089,28 @@ impl SecurityManager {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
-            let count = (num as usize).min(MAX_BONDED) as u8;
-            if count == 0 {
-                return Ok(0);
-            }
-
             let status = aci_gap_add_devices_to_list(
-                count,
-                entries.as_ptr() as *const ListEntry,
-                GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS,
+                0,
+                core::ptr::null(),
+                GAP_ADD_DEV_MODE_CLEAR_BOTH_FROM_SDB,
             );
             if status != BLE_STATUS_SUCCESS {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
-            Ok(count as usize)
+            let count = (num as usize).min(MAX_BONDED);
+
+            // Mode 0x0D only loads the list; it does not touch the translation
+            // enable. `clear_bond_lists` has to disable resolution to mutate the
+            // list at all, so without this the controller keeps a correctly
+            // populated resolving list that it is not permitted to use, and every
+            // bonded reconnect arrives as an unresolved RPA.
+            let status = hci_le_set_address_resolution_enable((count > 0) as u8);
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
+            }
+
+            Ok(count)
         }
     }
 
