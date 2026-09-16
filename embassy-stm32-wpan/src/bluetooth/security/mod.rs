@@ -81,6 +81,14 @@ unsafe extern "C" {
     #[link_name = "ACI_GAP_IS_DEVICE_BONDED"]
     fn aci_gap_is_device_bonded(peer_identity_address_type: u8, peer_identity_address: *const u8) -> tBleStatus;
 
+    #[link_name = "ACI_GAP_CHECK_BONDED_DEVICE"]
+    fn aci_gap_check_bonded_device(
+        peer_address_type: u8,
+        peer_address: *const u8,
+        id_address_type: *mut u8,
+        id_address: *mut u8,
+    ) -> tBleStatus;
+
     #[link_name = "HCI_LE_SET_ADDRESS_RESOLUTION_ENABLE"]
     fn hci_le_set_address_resolution_enable(enable: u8) -> tBleStatus;
 
@@ -791,6 +799,39 @@ impl SecurityManager {
             } else {
                 Err(BleError::CommandFailed(Status::from_u8(status)))
             }
+        }
+    }
+
+    /// Look a peer up in the bonding table, resolving the address first when it
+    /// is a Resolvable Private Address.
+    ///
+    /// Unlike [`is_device_bonded`](Self::is_device_bonded), which needs the peer's
+    /// *identity* address and therefore fails for a peer that reconnects behind a
+    /// rotating RPA, this resolves the supplied address against every IRK in the
+    /// host's security database. It works even with privacy disabled.
+    ///
+    /// Returns the identity address the peer distributed during bonding, or `None`
+    /// if no IRK in the database matches.
+    ///
+    /// New in CubeWBA 1.10 (`ACI_GAP_CHECK_BONDED_DEVICE`); it is also what the
+    /// deprecated `ACI_GAP_RESOLVE_PRIVATE_ADDR` now forwards to.
+    pub fn check_bonded_device(&self, address_type: u8, address: &[u8; 6]) -> Option<(u8, [u8; 6])> {
+        let mut id_address_type: u8 = 0;
+        let mut id_address = [0u8; 6];
+
+        let status = unsafe {
+            aci_gap_check_bonded_device(
+                address_type,
+                address.as_ptr(),
+                &mut id_address_type,
+                id_address.as_mut_ptr(),
+            )
+        };
+
+        if status == BLE_STATUS_SUCCESS {
+            Some((id_address_type, id_address))
+        } else {
+            None
         }
     }
 
