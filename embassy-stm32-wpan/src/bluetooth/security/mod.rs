@@ -104,6 +104,9 @@ unsafe extern "C" {
     #[link_name = "HCI_LE_CLEAR_FILTER_ACCEPT_LIST"]
     fn hci_le_clear_filter_accept_list() -> tBleStatus;
 
+    // Not used: GAP applies the privacy mode itself when initialised with privacy
+    // 0x02, and driving it here desynchronises GAP from the controller.
+    #[allow(dead_code)]
     #[link_name = "HCI_LE_SET_PRIVACY_MODE"]
     fn hci_le_set_privacy_mode(
         peer_identity_address_type: u8,
@@ -932,27 +935,31 @@ impl SecurityManager {
     /// Must NOT be called while advertising, scanning, or initiating is active.
     /// Returns the number of bonds programmed.
     pub fn configure_filter_and_resolving_list(&self) -> Result<usize, BleError> {
-        // Mode 0x01 clears and repopulates the resolving list *only*, deliberately
-        // leaving the Filter Accept List empty.
+        // This mirrors ST's BLE_Privacy_Peripheral `configure_filter_and_resolving_list()`
+        // exactly: read the bonded identities, then hand them to GAP in one call.
         //
-        // Populating the FAL as well (mode 0x04, which ST's reference uses) is a
-        // trap for a peripheral that advertises to phones: the FAL is matched
-        // against the peer's *resolved* identity, so the moment resolution fails
-        // for any reason the phone that owns the only bond is filtered out and
-        // cannot scan or connect. That turns a resolution problem into a total
-        // lockout, and it only bites after the first bond -- before that the FAL
-        // is empty and everything works. An empty FAL cannot filter anyone, so
-        // resolution becomes a pure optimisation rather than a gate.
+        // Mode 0x04 appends to both the resolving list and the Filter Accept List.
+        // Populating the FAL is harmless on its own -- it only gates traffic if the
+        // advertiser also passes a filter policy that consults it, and callers that
+        // want new peers to be able to connect simply keep the policy permissive.
         //
-        // ST gets away with 0x04 because BLE_Privacy_Peripheral then advertises
-        // with HCI_SCAN_FILTER_ACC_LIST_USED_EXT on purpose; it *wants* the gate.
+        // Everything else must be left to GAP. It is tempting to bracket this with
+        // HCI_LE_Set_Address_Resolution_Enable and clear the two lists first so the
+        // rebuild starts from a known state, but `aci_gap_init` with privacy 0x02
+        // makes GAP the owner of the resolving list and of the resolution enable
+        // flag. Driving them over raw HCI desynchronises GAP's view from the
+        // controller's, and the failure is silent and total: advertising still
+        // reports success and stays on the air with a valid RPA, yet the controller
+        // accepts no connection at all, so no HCI event is ever generated for the
+        // host to log. Scanners see the device and every connect attempt times out.
+        //
+        // For the same reason there is no HCI_LE_Set_Privacy_Mode loop here.
         //
         // Do not "simplify" this to one of the bonded-devices modes (0x08..=0x0D)
         // that clear and repopulate from the stack's own bond database: the basic
         // stack rejects them outright, with or without a zero Num_of_List_Entries,
-        // and the whole call then fails so nothing is programmed and address
-        // resolution stays off.
-        const GAP_ADD_DEV_MODE_CLEAR_AND_SET_RESOLVING_LIST: u8 = 0x01;
+        // and the whole call then fails so nothing is programmed.
+        const GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS: u8 = 0x04;
 
         const MAX_BONDED: usize = 16;
         let mut entries = [BondedDeviceEntry {
@@ -967,57 +974,18 @@ impl SecurityManager {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
-            // Drop whatever the controller is holding before rebuilding, with
-            // translation off so the list may be mutated.
-            let status = hci_le_set_address_resolution_enable(0);
-            if status != BLE_STATUS_SUCCESS {
-                return Err(BleError::CommandFailed(Status::from_u8(status)));
-            }
-
-            let status = hci_le_clear_resolving_list();
-            if status != BLE_STATUS_SUCCESS {
-                return Err(BleError::CommandFailed(Status::from_u8(status)));
-            }
-
-            let status = hci_le_clear_filter_accept_list();
-            if status != BLE_STATUS_SUCCESS {
-                return Err(BleError::CommandFailed(Status::from_u8(status)));
-            }
-
             let count = (num as usize).min(MAX_BONDED) as u8;
             if count == 0 {
-                // Nothing to resolve against, so leave resolution off rather
-                // than translating against an empty list.
                 return Ok(0);
-            }
-
-            // Enable resolution before programming the list (ST privacy peripheral order).
-            let status = hci_le_set_address_resolution_enable(1);
-            if status != BLE_STATUS_SUCCESS {
-                return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
             let status = aci_gap_add_devices_to_list(
                 count,
                 entries.as_ptr() as *const ListEntry,
-                GAP_ADD_DEV_MODE_CLEAR_AND_SET_RESOLVING_LIST,
+                GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS,
             );
             if status != BLE_STATUS_SUCCESS {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
-            }
-
-            // Set Device Privacy mode for each bonded peer (BT Core Vol 6 Part B 4.7).
-            // Default Network Privacy mode silently drops connect requests when the peer
-            // address can't be resolved via the stored IRK — which happens whenever iOS
-            // rotates its RPA past the timeout. Device Privacy mode also accepts the peer
-            // using its identity address as a fallback, so reconnect works either way.
-            const PRIVACY_MODE_DEVICE: u8 = 0x01;
-            for i in 0..(count as usize) {
-                let e = &entries[i];
-                let status = hci_le_set_privacy_mode(e.address_type, e.address.as_ptr(), PRIVACY_MODE_DEVICE);
-                if status != BLE_STATUS_SUCCESS {
-                    return Err(BleError::CommandFailed(Status::from_u8(status)));
-                }
             }
 
             Ok(count as usize)
@@ -1185,11 +1153,9 @@ impl SecurityManager {
 
             let count = (num as usize).min(MAX_BONDED) as u8;
 
-            let status = hci_le_set_address_resolution_enable(1);
-            if status != BLE_STATUS_SUCCESS {
-                return Err(BleError::CommandFailed(Status::from_u8(status)));
-            }
-
+            // No HCI_LE_Set_Address_Resolution_Enable here on purpose; GAP owns the
+            // resolution state once `aci_gap_init` runs with privacy 0x02. See
+            // `configure_filter_and_resolving_list` for what forcing it breaks.
             let status = aci_gap_add_devices_to_list(
                 count,
                 entries.as_ptr() as *const ListEntry,
