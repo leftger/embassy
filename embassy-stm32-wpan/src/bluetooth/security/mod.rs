@@ -104,9 +104,8 @@ unsafe extern "C" {
     #[link_name = "HCI_LE_CLEAR_FILTER_ACCEPT_LIST"]
     fn hci_le_clear_filter_accept_list() -> tBleStatus;
 
-    // Not used: GAP applies the privacy mode itself when initialised with privacy
-    // 0x02, and driving it here desynchronises GAP from the controller.
-    #[allow(dead_code)]
+    // Required for peers that reconnect from their identity address rather than an
+    // RPA, which is what phones do. See `set_device_privacy_mode`.
     #[link_name = "HCI_LE_SET_PRIVACY_MODE"]
     fn hci_le_set_privacy_mode(
         peer_identity_address_type: u8,
@@ -399,15 +398,51 @@ pub enum SecurityEvent {
 /// Convert an STM32 vendor-specific event into a high-level security event.
 ///
 /// Returns `None` for vendor events that do not map to [`SecurityEvent`].
+/// Put every bonded peer into Device privacy mode.
+///
+/// The default is Network privacy mode, where a peer listed in the resolving list
+/// is required to use a resolvable private address; if it connects using its
+/// identity address instead, the address counts as unresolved. The host then has
+/// nothing to tie the connection to a bond, so it cannot find the LTK, encryption
+/// fails, and the phone -- having had its key rejected -- drops the bond and pairs
+/// again from scratch. The visible trail is an ACI_GAP_ADDR_NOT_RESOLVED event
+/// followed by pairing-complete status 0x03.
+///
+/// Device privacy mode accepts the peer's identity address as well as an RPA.
+///
+/// ST's BLE_Privacy_Peripheral does not do this because its central is another WBA
+/// that always connects from an RPA. Phones do not behave that way: they routinely
+/// reconnect from their identity address, so a peripheral that talks to phones
+/// needs this. There is no ACI equivalent, hence the raw HCI call.
+///
+/// Failures are logged rather than propagated: an unset privacy mode degrades
+/// reconnect, but refusing to advertise would be worse.
+fn set_device_privacy_mode(entries: &[BondedDeviceEntry]) {
+    const PRIVACY_MODE_DEVICE: u8 = 0x01;
+
+    for e in entries {
+        let status =
+            unsafe { hci_le_set_privacy_mode(e.address_type, e.address.as_ptr(), PRIVACY_MODE_DEVICE) };
+        if status != BLE_STATUS_SUCCESS {
+            warn!(
+                "hci_le_set_privacy_mode failed: 0x{:02X} (peer will have to reconnect from an RPA)",
+                status
+            );
+        }
+    }
+}
+
 pub fn from_vendor_event(event: &VendorEvent) -> Option<SecurityEvent> {
     match event {
         VendorEvent::GapPairingComplete(e) => {
             let (status, reason) = match e.status {
                 GapPairingStatus::Success => (PairingStatus::Success, 0),
                 GapPairingStatus::Timeout(r) => (PairingStatus::Timeout, pairing_reason_to_u8(r)),
-                GapPairingStatus::Failed(r) | GapPairingStatus::EncryptionFailed(r) => {
-                    (PairingStatus::Failed, pairing_reason_to_u8(r))
-                }
+                GapPairingStatus::Failed(r) => (PairingStatus::Failed, pairing_reason_to_u8(r)),
+                // Keep these apart: encryption failing against a stored bond is a
+                // different fault from a refused pairing negotiation, and the
+                // pairing-complete reason code is only defined for the latter.
+                GapPairingStatus::EncryptionFailed(_) => (PairingStatus::EncryptionFailed, 0),
             };
             Some(SecurityEvent::PairingComplete {
                 conn_handle: e.conn_handle.0,
@@ -1018,6 +1053,7 @@ impl SecurityManager {
                 GAP_ADD_DEV_MODE_CLEAR_AND_ADD_BONDED_BOTH_LISTS,
             );
             if status == BLE_STATUS_SUCCESS {
+                set_device_privacy_mode(&entries[..count as usize]);
                 return Ok(count as usize);
             }
 
@@ -1039,6 +1075,8 @@ impl SecurityManager {
             if status != BLE_STATUS_SUCCESS {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
+
+            set_device_privacy_mode(&entries[..count as usize]);
 
             Ok(count as usize)
         }
