@@ -934,6 +934,12 @@ impl SecurityManager {
     pub fn configure_filter_and_resolving_list(&self) -> Result<usize, BleError> {
         // Mode 0x04 appends to both lists, which is safe here because both were
         // just cleared. ST mode 0x05 (clear+set) leaves peer_irk=0 on the basic stack.
+        //
+        // Do not "simplify" this to one of the bonded-devices modes (0x08..=0x0D)
+        // that clear and repopulate from the stack's own bond database: the basic
+        // stack rejects them outright, with or without a zero Num_of_List_Entries,
+        // and the whole call then fails so nothing is programmed and address
+        // resolution stays off. ST's own reference uses 0x04 for the same reason.
         const GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS: u8 = 0x04;
 
         const MAX_BONDED: usize = 16;
