@@ -104,8 +104,6 @@ unsafe extern "C" {
     #[link_name = "HCI_LE_CLEAR_FILTER_ACCEPT_LIST"]
     fn hci_le_clear_filter_accept_list() -> tBleStatus;
 
-    // Not used: GAP applies the privacy mode itself when initialised with privacy
-    // 0x02, and driving it here desynchronises GAP from the controller.
     #[allow(dead_code)]
     #[link_name = "HCI_LE_SET_PRIVACY_MODE"]
     fn hci_le_set_privacy_mode(
@@ -405,9 +403,11 @@ pub fn from_vendor_event(event: &VendorEvent) -> Option<SecurityEvent> {
             let (status, reason) = match e.status {
                 GapPairingStatus::Success => (PairingStatus::Success, 0),
                 GapPairingStatus::Timeout(r) => (PairingStatus::Timeout, pairing_reason_to_u8(r)),
-                GapPairingStatus::Failed(r) | GapPairingStatus::EncryptionFailed(r) => {
-                    (PairingStatus::Failed, pairing_reason_to_u8(r))
-                }
+                GapPairingStatus::Failed(r) => (PairingStatus::Failed, pairing_reason_to_u8(r)),
+                // Keep these apart: encryption failing against a stored bond is a
+                // different fault from a refused pairing negotiation, and the
+                // pairing-complete reason code is only defined for the latter.
+                GapPairingStatus::EncryptionFailed(_) => (PairingStatus::EncryptionFailed, 0),
             };
             Some(SecurityEvent::PairingComplete {
                 conn_handle: e.conn_handle.0,
@@ -457,8 +457,16 @@ pub enum PairingStatus {
     Success = 0x00,
     /// Pairing timed out
     Timeout = 0x01,
-    /// Pairing failed
+    /// Pairing failed. The pairing-complete `Reason` field is only meaningful for
+    /// this status.
     Failed = 0x02,
+    /// Encryption failed.
+    ///
+    /// This is what a bonded peer that cannot be encrypted reports, so it must be
+    /// distinguished from [`Self::Failed`]: it means the link key was rejected or
+    /// could not be found rather than that pairing was negotiated and refused. The
+    /// `Reason` field does not apply and holds no useful value here.
+    EncryptionFailed = 0x03,
 }
 
 impl PairingStatus {
@@ -467,6 +475,7 @@ impl PairingStatus {
         match value {
             0x00 => Self::Success,
             0x01 => Self::Timeout,
+            0x03 => Self::EncryptionFailed,
             _ => Self::Failed,
         }
     }
@@ -960,10 +969,9 @@ impl SecurityManager {
         //
         // For the same reason there is no HCI_LE_Set_Privacy_Mode loop here.
         //
-        // Do not "simplify" this to one of the bonded-devices modes (0x08..=0x0D)
-        // that clear and repopulate from the stack's own bond database: the basic
-        // stack rejects them outright, with or without a zero Num_of_List_Entries,
-        // and the whole call then fails so nothing is programmed.
+        // A List_Entry_t is only an address type plus an address; the stack pairs
+        // each one with the IRK it already holds in the security database for that
+        // identity. That is why ST passes the bonded identities straight through.
         const GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS: u8 = 0x04;
 
         const MAX_BONDED: usize = 16;
@@ -1130,6 +1138,34 @@ impl SecurityManager {
             } else {
                 Err(BleError::CommandFailed(Status::from_u8(status)))
             }
+        }
+    }
+
+    /// Whether `address` belongs to a peer already in the bond database.
+    ///
+    /// Pass the address reported by the connection-complete event. Once address
+    /// resolution is working the controller reports a bonded peer's *identity*
+    /// address there, so it can be compared against the bond database directly.
+    ///
+    /// Useful for deciding whether to send a peripheral security request: a peer
+    /// that is already bonded will start encryption from its own side, and asking
+    /// it to authenticate again is what ST's reference deliberately avoids.
+    pub fn is_bonded_address(&self, address_type: u8, address: &[u8; 6]) -> bool {
+        const MAX_BONDED: usize = 16;
+        let mut entries = [BondedDeviceEntry {
+            address_type: 0,
+            address: [0; 6],
+        }; MAX_BONDED];
+        let mut num: u8 = 0;
+
+        unsafe {
+            if aci_gap_get_bonded_devices(&mut num, entries.as_mut_ptr()) != BLE_STATUS_SUCCESS {
+                return false;
+            }
+
+            entries[..(num as usize).min(MAX_BONDED)]
+                .iter()
+                .any(|e| e.address_type == address_type && &e.address == address)
         }
     }
 
