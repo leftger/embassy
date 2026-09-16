@@ -912,29 +912,34 @@ impl SecurityManager {
     /// Rebuild the controller's resolving list and Filter Accept List from the
     /// bonds currently in the security database.
     ///
-    /// Modelled on ST `BLE_Privacy_Peripheral` `configure_filter_and_resolving_list()`,
-    /// but clear-then-rebuild rather than append, which makes it idempotent: one
-    /// call brings the controller in line with the database from any prior state.
-    /// Zero bonds therefore leaves both lists empty and address resolution off,
-    /// matching a freshly reset controller.
+    /// Idempotent: one call brings the controller in line with the database from
+    /// any prior state, so zero bonds leaves both lists empty and address
+    /// resolution off, matching a freshly reset controller. Appending instead
+    /// (and returning early when the database is empty, as this once did)
+    /// strands entries after the bonds that created them are gone — a peripheral
+    /// that cleared its bonds at runtime then needed a hardware reset before it
+    /// could bond again — and can duplicate a peer in a list only five deep on
+    /// this part.
     ///
-    /// Appending instead (and returning early when the database is empty, as
-    /// this used to) strands entries in the controller after the bonds that
-    /// created them are gone — so a peripheral that cleared its bonds at runtime
-    /// needed a hardware reset before it could bond again — and can duplicate a
-    /// peer across calls in a list that is typically only eight entries deep.
+    /// ST's `BLE_Privacy_Peripheral` reference does the rebuild with mode 0x04
+    /// and never touches address resolution, leaving that to
+    /// `aci_gap_init(privacy = 0x02)`. Resolution is enabled explicitly here
+    /// because the caller is expected to advertise with a Filter Accept List
+    /// policy: matching a bonded peer that connects from an RPA requires the
+    /// controller to resolve that RPA to the identity address in the list first.
     ///
-    /// The two clears run with address resolution disabled because the Core Spec
-    /// forbids mutating the resolving list while translation is enabled
-    /// (Vol 4, Part E, 7.8.40). Resolution is then re-enabled before the add,
-    /// which is the order ST's reference uses.
-    ///
-    /// Must NOT be called while advertising, scanning, or initiating is active.
+    /// Must NOT be called while advertising, scanning, or initiating is active —
+    /// `aci_gap_add_devices_to_list` refuses to touch the resolving list then.
     /// Returns the number of bonds programmed.
     pub fn configure_filter_and_resolving_list(&self) -> Result<usize, BleError> {
-        // Mode 0x04 appends to both lists, which is safe here because both were
-        // just cleared. ST mode 0x05 (clear+set) leaves peer_irk=0 on the basic stack.
-        const GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS: u8 = 0x04;
+        // Mode 0x0D: clear both lists, then add every device in the stack's own
+        // bond database to both, in a single command. `ListEntry` carries only an
+        // address type and address, so IRKs can never be passed in from here --
+        // they always come from the bond database, which is exactly what the
+        // "bonded devices" modes (0x08..=0x0D) source from. Doing it in one
+        // command also means the lists are never transiently empty, unlike the
+        // clear-then-append this replaces.
+        const GAP_ADD_DEV_MODE_CLEAR_AND_ADD_BONDED_BOTH_LISTS: u8 = 0x0D;
 
         const MAX_BONDED: usize = 16;
         let mut entries = [BondedDeviceEntry {
@@ -949,41 +954,31 @@ impl SecurityManager {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
-            // Drop whatever the controller is holding before rebuilding, with
-            // translation off so the list may be mutated.
-            let status = hci_le_set_address_resolution_enable(0);
-            if status != BLE_STATUS_SUCCESS {
-                return Err(BleError::CommandFailed(Status::from_u8(status)));
-            }
-
-            let status = hci_le_clear_resolving_list();
-            if status != BLE_STATUS_SUCCESS {
-                return Err(BleError::CommandFailed(Status::from_u8(status)));
-            }
-
-            let status = hci_le_clear_filter_accept_list();
+            // Pass zero entries: mode 0x0D already pulls the bonded devices, so
+            // supplying them again would only risk duplicating each peer in a
+            // list that is often just five deep. The addresses read above are
+            // still needed below, for the per-peer privacy mode.
+            let status = aci_gap_add_devices_to_list(
+                0,
+                entries.as_ptr() as *const ListEntry,
+                GAP_ADD_DEV_MODE_CLEAR_AND_ADD_BONDED_BOTH_LISTS,
+            );
             if status != BLE_STATUS_SUCCESS {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
             let count = (num as usize).min(MAX_BONDED) as u8;
             if count == 0 {
-                // Nothing to resolve against, so leave resolution off rather
-                // than translating against an empty list.
+                // Mode 0x0D has already emptied both lists; just make sure the
+                // controller is not translating against nothing.
+                let status = hci_le_set_address_resolution_enable(0);
+                if status != BLE_STATUS_SUCCESS {
+                    return Err(BleError::CommandFailed(Status::from_u8(status)));
+                }
                 return Ok(0);
             }
 
-            // Enable resolution before programming the list (ST privacy peripheral order).
             let status = hci_le_set_address_resolution_enable(1);
-            if status != BLE_STATUS_SUCCESS {
-                return Err(BleError::CommandFailed(Status::from_u8(status)));
-            }
-
-            let status = aci_gap_add_devices_to_list(
-                count,
-                entries.as_ptr() as *const ListEntry,
-                GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS,
-            );
             if status != BLE_STATUS_SUCCESS {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
