@@ -104,8 +104,7 @@ unsafe extern "C" {
     #[link_name = "HCI_LE_CLEAR_FILTER_ACCEPT_LIST"]
     fn hci_le_clear_filter_accept_list() -> tBleStatus;
 
-    // Required for peers that reconnect from their identity address rather than an
-    // RPA, which is what phones do. See `set_device_privacy_mode`.
+    #[allow(dead_code)]
     #[link_name = "HCI_LE_SET_PRIVACY_MODE"]
     fn hci_le_set_privacy_mode(
         peer_identity_address_type: u8,
@@ -398,40 +397,6 @@ pub enum SecurityEvent {
 /// Convert an STM32 vendor-specific event into a high-level security event.
 ///
 /// Returns `None` for vendor events that do not map to [`SecurityEvent`].
-/// Put every bonded peer into Device privacy mode.
-///
-/// The default is Network privacy mode, where a peer listed in the resolving list
-/// is required to use a resolvable private address; if it connects using its
-/// identity address instead, the address counts as unresolved. The host then has
-/// nothing to tie the connection to a bond, so it cannot find the LTK, encryption
-/// fails, and the phone -- having had its key rejected -- drops the bond and pairs
-/// again from scratch. The visible trail is an ACI_GAP_ADDR_NOT_RESOLVED event
-/// followed by pairing-complete status 0x03.
-///
-/// Device privacy mode accepts the peer's identity address as well as an RPA.
-///
-/// ST's BLE_Privacy_Peripheral does not do this because its central is another WBA
-/// that always connects from an RPA. Phones do not behave that way: they routinely
-/// reconnect from their identity address, so a peripheral that talks to phones
-/// needs this. There is no ACI equivalent, hence the raw HCI call.
-///
-/// Failures are logged rather than propagated: an unset privacy mode degrades
-/// reconnect, but refusing to advertise would be worse.
-fn set_device_privacy_mode(entries: &[BondedDeviceEntry]) {
-    const PRIVACY_MODE_DEVICE: u8 = 0x01;
-
-    for e in entries {
-        let status =
-            unsafe { hci_le_set_privacy_mode(e.address_type, e.address.as_ptr(), PRIVACY_MODE_DEVICE) };
-        if status != BLE_STATUS_SUCCESS {
-            warn!(
-                "hci_le_set_privacy_mode failed: 0x{:02X} (peer will have to reconnect from an RPA)",
-                status
-            );
-        }
-    }
-}
-
 pub fn from_vendor_event(event: &VendorEvent) -> Option<SecurityEvent> {
     match event {
         VendorEvent::GapPairingComplete(e) => {
@@ -1004,20 +969,10 @@ impl SecurityManager {
         //
         // For the same reason there is no HCI_LE_Set_Privacy_Mode loop here.
         //
-        // The mode families are not interchangeable. Modes 0x00..=0x05 add "the
-        // devices provided as parameters", and a List_Entry_t is just an address
-        // type plus an address, so those entries land in the resolving list with an
-        // all-zero peer IRK. The controller then cannot resolve a reconnecting
-        // phone's RPA: SMP finds no LTK for it, pairing fails with 0x06 and the user
-        // is asked to confirm a fresh passkey on every reconnect. A resolving list
-        // entry whose peer IRK is missing also reads its identity address back from
-        // HCI_LE_Read_Peer_Resolvable_Address, which is how to spot this.
-        //
-        // Modes 0x08..=0x0D add "the bonded devices", sourced from the security
-        // database, which is what carries the IRKs. Only the basic stack rejects
-        // them, so try 0x0D and keep ST's 0x04 as a fallback.
+        // A List_Entry_t is only an address type plus an address; the stack pairs
+        // each one with the IRK it already holds in the security database for that
+        // identity. That is why ST passes the bonded identities straight through.
         const GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS: u8 = 0x04;
-        const GAP_ADD_DEV_MODE_CLEAR_AND_ADD_BONDED_BOTH_LISTS: u8 = 0x0D;
 
         const MAX_BONDED: usize = 16;
         let mut entries = [BondedDeviceEntry {
@@ -1037,36 +992,6 @@ impl SecurityManager {
                 return Ok(0);
             }
 
-            // Prefer the bonded-devices mode: it is the only family that sources
-            // entries from the security database, so each resolving list entry gets
-            // the peer's IRK along with its identity address.
-            //
-            // The entry list is still passed. This mode adds "the bonded devices
-            // plus the devices provided as parameters", and calling it with
-            // Num_of_List_Entries = 0 only performs the clear -- it leaves the
-            // resolving list empty rather than repopulating it from the bond
-            // database, which shows up as status 0x02 from both the peer and local
-            // resolvable address reads.
-            let status = aci_gap_add_devices_to_list(
-                count,
-                entries.as_ptr() as *const ListEntry,
-                GAP_ADD_DEV_MODE_CLEAR_AND_ADD_BONDED_BOTH_LISTS,
-            );
-            if status == BLE_STATUS_SUCCESS {
-                set_device_privacy_mode(&entries[..count as usize]);
-                return Ok(count as usize);
-            }
-
-            // Older/basic stack builds reject 0x08..=0x0D outright. Fall back to
-            // ST's supplied-list mode so advertising still comes up with a
-            // populated Filter Accept List, but say so: without the peer IRK the
-            // controller cannot resolve a reconnecting phone's RPA, SMP finds no
-            // LTK, and the phone is forced to pair again.
-            warn!(
-                "add_devices_to_list mode 0x{:02X} rejected (0x{:02X}); falling back to 0x{:02X}, bonded reconnect will not resolve peer RPAs",
-                GAP_ADD_DEV_MODE_CLEAR_AND_ADD_BONDED_BOTH_LISTS, status, GAP_ADD_DEV_MODE_APPEND_BOTH_LISTS
-            );
-
             let status = aci_gap_add_devices_to_list(
                 count,
                 entries.as_ptr() as *const ListEntry,
@@ -1075,8 +1000,6 @@ impl SecurityManager {
             if status != BLE_STATUS_SUCCESS {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
-
-            set_device_privacy_mode(&entries[..count as usize]);
 
             Ok(count as usize)
         }
