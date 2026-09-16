@@ -995,10 +995,16 @@ impl SecurityManager {
 
             // Prefer the bonded-devices mode: it is the only family that sources
             // entries from the security database, so each resolving list entry gets
-            // the peer's IRK along with its identity address. Num_of_List_Entries is
-            // zero because we are asking for the bond database, not a supplied list.
+            // the peer's IRK along with its identity address.
+            //
+            // The entry list is still passed. This mode adds "the bonded devices
+            // plus the devices provided as parameters", and calling it with
+            // Num_of_List_Entries = 0 only performs the clear -- it leaves the
+            // resolving list empty rather than repopulating it from the bond
+            // database, which shows up as status 0x02 from both the peer and local
+            // resolvable address reads.
             let status = aci_gap_add_devices_to_list(
-                0,
+                count,
                 entries.as_ptr() as *const ListEntry,
                 GAP_ADD_DEV_MODE_CLEAR_AND_ADD_BONDED_BOTH_LISTS,
             );
