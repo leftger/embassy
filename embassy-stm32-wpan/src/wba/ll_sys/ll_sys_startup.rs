@@ -139,6 +139,19 @@ pub mod ble_config {
     pub const CFG_BLE_EATT_BEARER_PER_LINK: u8 = 0;
     /// NVM maximum size (in 64-bit words)
     pub const CFG_BLE_NVM_SIZE_MAX: u16 = 256;
+    /// Host event FIFO size in bytes.
+    ///
+    /// The host stack queues its events here, and it is not optional: every ST
+    /// application sets it (512 bytes at the low end, and 1536 in
+    /// `BLE_p2pServer_Ext`, which this mirrors). Passing a null buffer leaves the
+    /// host with nowhere to queue events, and the full stack then rejects
+    /// `aci_gap_set_discoverable` with 0x0C (HCI_COMMAND_DISALLOWED).
+    pub const CFG_BLE_HOST_EVENT_BUF_SIZE: usize = 1536;
+
+    /// Host event FIFO length in `u16` units, which is how the stack counts it.
+    pub const fn host_event_fifo_len() -> usize {
+        divc(CFG_BLE_HOST_EVENT_BUF_SIZE, 2)
+    }
     /// ST's `BLE_OPTIONS_*` flags for [`BleStack_init_t::options`] (ble_defs.h).
     #[allow(dead_code)]
     pub mod ble_options {
@@ -257,9 +270,14 @@ mod ble_buffers {
     #[repr(align(8))]
     pub struct NvmCacheBuffer(pub [u64; ble_config::CFG_BLE_NVM_SIZE_MAX as usize]);
 
+    /// Host event FIFO, in u16 units (see [`ble_config::host_event_fifo_len`]).
+    #[repr(align(4))]
+    pub struct HostEventBuffer(pub [u16; ble_config::host_event_fifo_len()]);
+
     pub static mut DYN_ALLOC_BUFFER: DynAllocBuffer = DynAllocBuffer([0u8; ble_config::dyn_alloc_buffer_size()]);
     pub static mut GATT_BUFFER: GattBuffer = GattBuffer([0u8; ble_config::gatt_buffer_size()]);
     pub static mut NVM_CACHE_BUFFER: NvmCacheBuffer = NvmCacheBuffer([0u64; ble_config::CFG_BLE_NVM_SIZE_MAX as usize]);
+    pub static mut HOST_EVENT_BUFFER: HostEventBuffer = HostEventBuffer([0u16; ble_config::host_event_fifo_len()]);
 }
 
 #[cfg(feature = "wba-ble")]
@@ -322,8 +340,8 @@ pub fn init_ble_stack() -> Result<(), u8> {
             gatt_long_write_buffer: core::ptr::null_mut(),
             extra_data_buffer: core::ptr::null_mut(),
             extra_data_buffer_size: 0,
-            host_event_fifo_buffer: core::ptr::null_mut(),
-            host_event_fifo_buffer_size: 0,
+            host_event_fifo_buffer: ble_buffers::HOST_EVENT_BUFFER.0.as_mut_ptr(),
+            host_event_fifo_buffer_size: ble_config::host_event_fifo_len() as u16,
             numAttrRecord: CFG_BLE_NUM_GATT_ATTRIBUTES,
             numAttrServ: CFG_BLE_NUM_GATT_SERVICES,
             attrValueArrSize: CFG_BLE_ATT_VALUE_ARRAY_SIZE,
