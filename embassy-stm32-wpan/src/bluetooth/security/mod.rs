@@ -31,7 +31,6 @@ use crate::bluetooth::hci::types::Status;
 #[allow(non_camel_case_types)]
 type tBleStatus = u8;
 
-#[link(name = "stm32wba_ble_stack_basic")]
 unsafe extern "C" {
     #[link_name = "ACI_GAP_SET_IO_CAPABILITY"]
     fn aci_gap_set_io_capability(io_capability: u8) -> tBleStatus;
