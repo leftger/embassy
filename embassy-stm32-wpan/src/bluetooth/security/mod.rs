@@ -932,6 +932,9 @@ impl SecurityManager {
     /// from the security database. GAP therefore owns the full operation and
     /// keeps its internal privacy state synchronized with the controller.
     ///
+    /// Address resolution is then enabled iff at least one bond was programmed,
+    /// so the controller's translation state always matches the list contents.
+    ///
     /// Must NOT be called while advertising, scanning, or initiating is active.
     /// Returns the number of bonds programmed.
     pub fn configure_filter_and_resolving_list(&self) -> Result<usize, BleError> {
@@ -959,7 +962,19 @@ impl SecurityManager {
                 return Err(BleError::CommandFailed(Status::from_u8(status)));
             }
 
-            Ok((num as usize).min(MAX_BONDED))
+            let count = (num as usize).min(MAX_BONDED);
+
+            // Mode 0x0D only loads the list; it does not touch the translation
+            // enable. `clear_bond_lists` has to disable resolution to mutate the
+            // list at all, so without this the controller keeps a correctly
+            // populated resolving list that it is not permitted to use, and every
+            // bonded reconnect arrives as an unresolved RPA.
+            let status = hci_le_set_address_resolution_enable((count > 0) as u8);
+            if status != BLE_STATUS_SUCCESS {
+                return Err(BleError::CommandFailed(Status::from_u8(status)));
+            }
+
+            Ok(count)
         }
     }
 
