@@ -81,9 +81,6 @@ unsafe extern "C" {
     #[link_name = "ACI_GAP_IS_DEVICE_BONDED"]
     fn aci_gap_is_device_bonded(peer_identity_address_type: u8, peer_identity_address: *const u8) -> tBleStatus;
 
-    #[link_name = "ACI_GAP_PAIRING_REQUEST_REPLY"]
-    fn aci_gap_pairing_request_reply(connection_handle: u16, accept: u8) -> tBleStatus;
-
     #[link_name = "ACI_HAL_WRITE_CONFIG_DATA"]
     fn aci_hal_write_config_data(offset: u8, length: u8, value: *const u8) -> tBleStatus;
 
@@ -846,26 +843,13 @@ impl SecurityManager {
     ///
     /// Must be called before pairing starts. See [`SmpMode`] for the flags.
     /// Note that setting [`SmpMode::PAIRING_REQUEST_EVENT`] makes the stack wait
-    /// for [`pairing_request_reply`](Self::pairing_request_reply) on every
+    /// for [`pairing_request_response`](Self::pairing_request_response) on every
     /// incoming Pairing Request, so the application must handle
     /// [`SecurityEvent::PairingRequest`] or pairing will stall.
     pub fn set_smp_mode(&self, mode: u8) -> Result<(), BleError> {
         const CONFIG_DATA_SMP_MODE_OFFSET: u8 = 0xB0;
 
         let status = unsafe { aci_hal_write_config_data(CONFIG_DATA_SMP_MODE_OFFSET, 1, &mode) };
-        if status == BLE_STATUS_SUCCESS {
-            Ok(())
-        } else {
-            Err(BleError::CommandFailed(Status::from_u8(status)))
-        }
-    }
-
-    /// Accept or reject an incoming Pairing Request or Security Request.
-    ///
-    /// Required response to [`SecurityEvent::PairingRequest`], which is only
-    /// delivered when [`SmpMode::PAIRING_REQUEST_EVENT`] is set.
-    pub fn pairing_request_reply(&self, conn_handle: u16, accept: bool) -> Result<(), BleError> {
-        let status = unsafe { aci_gap_pairing_request_reply(conn_handle, accept as u8) };
         if status == BLE_STATUS_SUCCESS {
             Ok(())
         } else {
