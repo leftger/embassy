@@ -1,0 +1,54 @@
+[package]
+name = "embassy-stm32-nn"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Embassy companion driver integrating embedded-nn with STM32N6 Neural-ART (ATON) NPU."
+keywords = ["embedded", "async", "stm32", "npu", "neural-network", "tinyml"]
+categories = ["embedded", "hardware-support", "no-std"]
+repository = "https://github.com/embassy-rs/embassy"
+documentation = "https://docs.embassy.dev/embassy-stm32-nn"
+readme = "README.md"
+
+publish = false
+
+[package.metadata.embassy]
+build = [
+    { target = "thumbv8m.main-none-eabihf", features = ["stm32n657x0"] },
+]
+
+[package.metadata.embassy_docs]
+src_base = "https://github.com/embassy-rs/embassy/blob/embassy-stm32-nn-v$VERSION/embassy-stm32-nn/src/"
+src_base_git = "https://github.com/embassy-rs/embassy/blob/$COMMIT/embassy-stm32-nn/src/"
+target = "thumbv8m.main-none-eabihf"
+features = ["stm32n657x0"]
+
+[package.metadata.docs.rs]
+features = ["stm32n657x0"]
+
+[dependencies]
+embassy-stm32 = { version = "0.6.0", path = "../embassy-stm32", features = ["unstable-pac"] }
+embassy-hal-internal = { version = "0.5.0", path = "../embassy-hal-internal" }
+embedded-nn = { git = "https://github.com/leftger/embedded-nn", branch = "main", default-features = false }
+
+aligned = "0.4.2"
+critical-section = "1.2"
+heapless = { version = "0.9", default-features = false }
+
+defmt = { version = "1.0.1", optional = true }
+log = { version = "0.4.17", optional = true }
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+cortex-m = "0.7"
+
+[features]
+default = []
+defmt = ["dep:defmt", "embassy-hal-internal/defmt", "embassy-stm32/defmt"]
+log = ["dep:log"]
+
+## Chip families
+n6 = []
+
+stm32n657x0 = ["embassy-stm32/stm32n657x0", "n6"]
+stm32n655x0 = ["embassy-stm32/stm32n655x0", "n6"]
+stm32n647x0 = ["embassy-stm32/stm32n647x0", "n6"]

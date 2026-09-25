@@ -50,6 +50,10 @@ embedded-3dgfx = { version="0.7.2", default-features = false, features = ["row_w
 embedded-gui = { version="0.2.7", default-features = false, features = ["rich-widgets", "micromath", "embedded-graphics"] }
 nalgebra = { version = "0.35", default-features = false, features = ["libm"] }
 
+# `npu_inference` only.
+embassy-stm32-nn = { version = "0.1.0", path = "../../embassy-stm32-nn", default-features = false, features = ["defmt", "stm32n657x0"] }
+embedded-nn = { git = "https://github.com/leftger/embedded-nn", branch = "main", default-features = false, features = ["libm"] }
+
 [features]
 default = ["stub-gpu2d"]
 stub-gpu2d = ["embassy-stm32-neochrom/stub-gpu2d"]
