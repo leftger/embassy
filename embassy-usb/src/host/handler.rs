@@ -37,7 +37,7 @@ pub(crate) const DESCRIPTOR_RETRY_MS: u64 = 5;
 /// A disconnect is returned immediately because the device is gone.
 /// Retrying would start another transfer after detach, which cannot
 /// meaningfully succeed and may remain pending depending on the host driver.
-pub(crate) async fn retry_descriptor<T, E>(mut read: impl AsyncFnMut() -> Result<T, E>) -> Result<T, E>
+pub async fn retry_descriptor<T, E>(mut read: impl AsyncFnMut() -> Result<T, E>) -> Result<T, E>
 where
     E: Copy + Into<HostError>,
 {
@@ -201,26 +201,6 @@ impl EnumerationInfo {
             return Err(HostError::InvalidDescriptor);
         }
 
-        // Both reads below are retried, for the same reason the device
-        // descriptor above them already is: some devices STALL a
-        // descriptor read once and answer the identical request
-        // milliseconds later. Leaving the configuration descriptor as
-        // the only unretried read in enumeration means one such device
-        // never enumerates at all, having already got past every step
-        // that does allow for it.
-        //
-        // Observed on a USB gamepad (0428:4001), which STALLs the first
-        // configuration-descriptor read issued after it is addressed and
-        // then answers the same request on the next attempt. Linux's
-        // usbcore makes the same allowance for every descriptor read in
-        // `usb_get_descriptor`, commented "some devices are flakey".
-        //
-        // Retrying is safe here in a way it would not be for a
-        // state-changing request: a descriptor read is idempotent, and a
-        // control transfer restarts from its SETUP, which clears a
-        // control endpoint's protocol stall (USB 2.0 §8.5.3.4) — so
-        // there is no leftover state from the failed attempt to undo
-        // first.
         let cfg_desc_short = retry_descriptor(async || {
             channel
                 .request_descriptor::<ConfigurationDescriptor, { ConfigurationDescriptor::BUF_SIZE }>(index, false)
@@ -295,7 +275,6 @@ mod tests {
 
     #[test]
     fn retry_descriptor_does_not_retry_disconnect() {
-        // `PipeError`: callers that read with `control_in`.
         let mut calls = 0;
         let res: Result<(), PipeError> = run(retry_descriptor(async || {
             calls += 1;
@@ -304,7 +283,6 @@ mod tests {
         assert_eq!(res, Err(PipeError::Disconnected));
         assert_eq!(calls, 1);
 
-        // `HostError`: callers that read with `request_descriptor`.
         let mut calls = 0;
         let res: Result<(), HostError> = run(retry_descriptor(async || {
             calls += 1;

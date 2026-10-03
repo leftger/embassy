@@ -7,7 +7,7 @@ use embassy_usb_driver::host::{PipeError, UsbHostAllocator, UsbPipe, pipe};
 use embassy_usb_driver::{Direction as UsbDirection, EndpointAddress, EndpointInfo, EndpointType};
 
 use crate::descriptor::ConfigurationDescriptorChain;
-use crate::handler::EnumerationInfo;
+use crate::host::EnumerationInfo;
 
 const USB_CLASS_CCID: u8 = 0x0b;
 const TRANSFER_BULK: u8 = 0x02;

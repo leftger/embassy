@@ -19,7 +19,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use embassy_usb_host::class::vcp::cp210x::{Cp210xDevice, LineCoding, Parity, StopBits, id};
+//! use embassy_usb::class::vcp::cp210x::{Cp210xDevice, LineCoding, Parity, StopBits, id};
 //!
 //! if enum_info.device_desc.vendor_id != id::VID_SILABS {
 //!     continue;
@@ -50,7 +50,7 @@ use embassy_usb_driver::{Direction as UsbDirection, EndpointAddress, EndpointInf
 
 use crate::control::SetupPacket;
 use crate::descriptor::ConfigurationDescriptorChain;
-use crate::handler::EnumerationInfo;
+use crate::host::EnumerationInfo;
 
 /// Silicon Labs VID and CP210x PIDs.
 pub mod id {

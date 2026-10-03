@@ -9,17 +9,15 @@ use core::ops::Deref;
 
 use bitflags::bitflags;
 use embassy_time::Timer;
-use embassy_usb::control::Request;
 use embassy_usb_driver::host::{HostError, SplitInfo, SplitSpeed, UsbHostAllocator, UsbPipe, pipe};
 use embassy_usb_driver::{Direction, EndpointInfo, EndpointType, Speed};
 
-use crate::control::{ControlPipeExt, ControlType, Recipient, RequestType, SetupPacket};
+use crate::control::{ControlPipeExt, Recipient, Request, RequestType, SetupPacket};
 use crate::descriptor::{
     DEFAULT_MAX_DESCRIPTOR_SIZE, DescriptorError, InterfaceDescriptor, USBDescriptor, VariableSizeDescriptor,
     WritableDescriptor,
 };
-use crate::handler::{BusRoute, EnumerationInfo, HandlerEvent, RegisterError};
-use crate::{BusHandle, EnumerationError};
+use crate::host::{BusHandle, BusRoute, EnumerationError, EnumerationInfo, HandlerEvent, RegisterError};
 
 /// How many times a port is polled for `ENABLED` after a reset before
 /// enumeration gives up waiting and proceeds with the speed it has.
@@ -108,7 +106,7 @@ impl<'d, A: UsbHostAllocator<'d>, const MAX_PORTS: usize> HubHandler<'d, A, MAX_
             enum_info.split(),
         )?;
 
-        let desc = crate::handler::retry_descriptor(async || {
+        let desc = crate::host::retry_descriptor(async || {
             control_channel
                 .request_descriptor::<HubDescriptor, { HubDescriptor::BUF_SIZE }>(0, true)
                 .await
@@ -229,11 +227,9 @@ impl<'d, A: UsbHostAllocator<'d>, const MAX_PORTS: usize> HubHandler<'d, A, MAX_
 
     async fn hub_feature(&mut self, set: bool, feature: HubFeature) -> Result<(), HostError> {
         let setup = SetupPacket {
-            request_type: RequestType {
-                direction: Direction::Out,
-                control_type: ControlType::Class,
-                recipient: Recipient::Device,
-            },
+            direction: Direction::Out,
+            request_type: RequestType::Class,
+            recipient: Recipient::Device,
             request: if set {
                 Request::SET_FEATURE
             } else {
@@ -249,11 +245,9 @@ impl<'d, A: UsbHostAllocator<'d>, const MAX_PORTS: usize> HubHandler<'d, A, MAX_
 
     async fn get_hub_status(&mut self) -> Result<(HubStatus, HubStatusChange), HostError> {
         let setup = SetupPacket {
-            request_type: RequestType {
-                direction: Direction::In,
-                control_type: ControlType::Class,
-                recipient: Recipient::Device,
-            },
+            direction: Direction::In,
+            request_type: RequestType::Class,
+            recipient: Recipient::Device,
             request: Request::GET_STATUS,
             value: 0,
             index: 0,
@@ -372,11 +366,9 @@ impl<'d, A: UsbHostAllocator<'d>, const MAX_PORTS: usize> HubHandler<'d, A, MAX_
 
     async fn port_feature(&mut self, set: bool, feature: PortFeature, port: u8, selector: u8) -> Result<(), HostError> {
         let setup = SetupPacket {
-            request_type: RequestType {
-                direction: Direction::Out,
-                control_type: ControlType::Class,
-                recipient: Recipient::Other,
-            },
+            direction: Direction::Out,
+            request_type: RequestType::Class,
+            recipient: Recipient::Other,
             request: if set {
                 Request::SET_FEATURE
             } else {
@@ -392,11 +384,9 @@ impl<'d, A: UsbHostAllocator<'d>, const MAX_PORTS: usize> HubHandler<'d, A, MAX_
 
     async fn get_port_status(&mut self, port: u8) -> Result<(PortStatus, PortStatusChange), HostError> {
         let setup = SetupPacket {
-            request_type: RequestType {
-                direction: Direction::In,
-                control_type: ControlType::Class,
-                recipient: Recipient::Other,
-            },
+            direction: Direction::In,
+            request_type: RequestType::Class,
+            recipient: Recipient::Other,
             request: Request::GET_STATUS,
             value: 0,
             index: (port + 1) as u16,

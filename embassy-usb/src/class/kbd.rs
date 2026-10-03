@@ -13,7 +13,7 @@ use crate::descriptor::{
     DEFAULT_MAX_DESCRIPTOR_SIZE, DescriptorError, InterfaceDescriptor, USBDescriptor, VariableSizeDescriptor,
     WritableDescriptor,
 };
-use crate::handler::{EnumerationInfo, HandlerEvent, RegisterError};
+use crate::host::{EnumerationInfo, HandlerEvent, RegisterError};
 
 #[repr(C)]
 #[derive(Debug)]

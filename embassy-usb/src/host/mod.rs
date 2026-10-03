@@ -1,28 +1,11 @@
-#![no_std]
-#![allow(async_fn_in_trait)]
-#![doc = include_str!("../README.md")]
-#![warn(missing_docs)]
+//! Async USB host stack for embedded devices.
 
-/// Get max value in const context.
-macro_rules! const_max {
-    ($first:expr $(, $next:expr)* $(,)?) => {{
-        let mut max = $first;
-        $(
-            if max < $next {
-                max = $next;
-            }
-        )*
-        max
-    }};
-}
-
-// This mod MUST go first, so that the others see its macros.
-pub(crate) mod fmt;
-
-pub mod class;
-pub mod control;
-pub mod descriptor;
 pub mod handler;
+
+pub use crate::class;
+pub use crate::control::{self, ControlPipeExt, Request, SetupPacket};
+pub use crate::descriptor;
+pub use self::handler::{BusRoute, EnumerationInfo, HandlerEvent, RegisterError, retry_descriptor};
 
 use core::cell::RefCell;
 use core::marker::PhantomData;
@@ -34,10 +17,7 @@ use embassy_usb_driver::host::{DeviceEvent, HostError, PipeError, UsbHostAllocat
 pub use embassy_usb_driver::host::{SplitInfo, SplitSpeed};
 use embassy_usb_driver::{Direction as UsbDirection, EndpointAddress, EndpointInfo, EndpointType, Speed};
 
-use crate::control::{ControlPipeExt, SetupPacket};
 use crate::descriptor::{ConfigurationDescriptor, DeviceDescriptor, USBDescriptor};
-pub use crate::handler::BusRoute;
-use crate::handler::EnumerationInfo;
 
 /// USB host enumeration error.
 #[derive(Debug)]
@@ -386,13 +366,7 @@ impl<'d, A: UsbHostAllocator<'d>> BusHandle<'d, A> {
             .alloc_pipe::<pipe::Control, pipe::InOut>(assigned_addr, &ep0_info, route.split())
             .map_err(|_| EnumerationError::NoPipe)?;
 
-        // Retried on any error, not only on a timeout as this read used
-        // to be. A device flaky enough to STALL a descriptor read is the
-        // case the retry exists for, and a stall took the `v => return v`
-        // arm straight out of the loop — so the read with the largest
-        // retry budget in the function was also the one that gave up
-        // first on the most likely failure.
-        let dev_desc = crate::handler::retry_descriptor(async || {
+        let dev_desc = crate::host::handler::retry_descriptor(async || {
             ch.request_descriptor::<DeviceDescriptor, { DeviceDescriptor::BUF_SIZE }>(0, false)
                 .await
         })
@@ -405,7 +379,7 @@ impl<'d, A: UsbHostAllocator<'d>> BusHandle<'d, A> {
 
         // Step 4: Get configuration descriptor header (9 bytes).
         let setup = SetupPacket::get_config_descriptor(0, 9);
-        let n = crate::handler::retry_descriptor(async || ch.control_in(&setup.to_bytes(), &mut config_buf[..9]).await)
+        let n = crate::host::handler::retry_descriptor(async || ch.control_in(&setup.to_bytes(), &mut config_buf[..9]).await)
             .await?;
 
         if n < 9 {
@@ -422,7 +396,7 @@ impl<'d, A: UsbHostAllocator<'d>> BusHandle<'d, A> {
 
         // Get full configuration descriptor.
         let setup = SetupPacket::get_config_descriptor(0, total_len as u16);
-        let n = crate::handler::retry_descriptor(async || {
+        let n = crate::host::handler::retry_descriptor(async || {
             ch.control_in(&setup.to_bytes(), &mut config_buf[..total_len]).await
         })
         .await?;

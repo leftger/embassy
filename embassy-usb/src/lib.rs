@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(async_fn_in_trait)]
 #![allow(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
@@ -8,11 +9,26 @@ pub(crate) mod fmt;
 
 pub use embassy_usb_driver as driver;
 
+/// Get max value in const context.
+#[allow(unused_macros)]
+macro_rules! const_max {
+    ($first:expr $(, $next:expr)* $(,)?) => {{
+        let mut max = $first;
+        $(
+            if max < $next {
+                max = $next;
+            }
+        )*
+        max
+    }};
+}
+
 mod builder;
 pub mod class;
 pub mod control;
 pub mod descriptor;
 mod descriptor_reader;
+pub mod host;
 pub mod msos;
 pub mod types;
 

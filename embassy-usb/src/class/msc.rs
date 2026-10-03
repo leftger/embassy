@@ -20,7 +20,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use embassy_usb_host::class::msc::MscDevice;
+//! use embassy_usb::class::msc::MscDevice;
 //!
 //! let device = MscDevice::new(&bus, &enum_info, &config_buf[..config_len]).await?;
 //! let mut lun = device.lun(0)?;
@@ -40,9 +40,9 @@ use embassy_sync::mutex::Mutex;
 use embassy_usb_driver::host::{PipeError, SplitInfo, UsbHostAllocator, UsbPipe, pipe};
 use embassy_usb_driver::{Direction as UsbDirection, EndpointAddress, EndpointInfo, EndpointType};
 
-use crate::control::{ControlType, Recipient, RequestType, SetupPacket};
+use crate::control::{Recipient, RequestType, SetupPacket};
 use crate::descriptor::ConfigurationDescriptorChain;
-use crate::handler::EnumerationInfo;
+use crate::host::EnumerationInfo;
 
 // MSC BBB r1.0 §4.
 const CLASS_MSC: u8 = 0x08;
@@ -441,11 +441,9 @@ where
     P: UsbPipe<pipe::Control, pipe::InOut>,
 {
     let setup = SetupPacket {
-        request_type: RequestType {
-            direction: UsbDirection::Out,
-            control_type: ControlType::Standard,
-            recipient: Recipient::Endpoint,
-        },
+        direction: UsbDirection::Out,
+        request_type: RequestType::Standard,
+        recipient: Recipient::Endpoint,
         request: REQ_CLEAR_FEATURE,
         value: FEATURE_ENDPOINT_HALT,
         index: ep_addr as u16,

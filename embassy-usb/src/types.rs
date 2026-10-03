@@ -41,3 +41,9 @@ impl From<StringIndex> for u8 {
         i.0
     }
 }
+
+impl From<u8> for StringIndex {
+    fn from(i: u8) -> StringIndex {
+        StringIndex(i)
+    }
+}

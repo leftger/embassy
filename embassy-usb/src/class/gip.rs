@@ -33,7 +33,7 @@
 //! Rumble while the A button is held:
 //!
 //! ```ignore
-//! use embassy_usb_host::class::gip::{GipHost, XboxOneSGamepad, GipEvent, RumbleCommand};
+//! use embassy_usb::class::gip::{GipHost, XboxOneSGamepad, GipEvent, RumbleCommand};
 //!
 //! let mut gip = GipHost::<_, XboxOneSGamepad>::try_register(
 //!     &bus,
@@ -70,7 +70,7 @@ use embassy_usb_driver::host::{PipeError, UsbHostAllocator, UsbPipe, pipe};
 use embassy_usb_driver::{Direction as UsbDirection, EndpointAddress, EndpointInfo, EndpointType};
 
 use crate::descriptor::ConfigurationDescriptorChain;
-use crate::handler::EnumerationInfo;
+use crate::host::EnumerationInfo;
 
 // ── GIP USB interface identifiers ────────────────────────────────────────────
 
