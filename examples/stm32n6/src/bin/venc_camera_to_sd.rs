@@ -7,7 +7,7 @@
 //! Streams the IMX335 → CSI → DCMIPP pipeline into RGB565 frames in AXI SRAM
 //! and runs them through the on-chip Video Encoder:
 //!
-//! * **B4 (Tamper, PE0)** — record an H.264 clip (`VID<NNNN>.H264`, Annex-B).
+//! * **B4 (Tamper, PE0)** — record an H.264 clip (`VID<NNNN>.264`, Annex-B).
 //!   Recording stops when B4 is pressed again or after `MAX_FRAMES` frames.
 //! * **B2 (PC13)** — write a single JPEG snapshot (`IMG<NNNN>.JPG`).
 //!
@@ -198,10 +198,10 @@ async fn main(_spawner: Spawner) {
                     continue;
                 };
                 let idx = *next_idx;
-                info!("record: VID{:04}.H264", idx);
+                info!("record: VID{:04}.264", idx);
                 let bytes = record_clip(volume_mgr, &mut pipe1, &venc, &mut record_button, idx).await;
                 if bytes != 0 {
-                    info!("record: wrote {} bytes to VID{:04}.H264", bytes, idx);
+                    info!("record: wrote {} bytes to VID{:04}.264", bytes, idx);
                     *next_idx = next_idx.wrapping_add(1);
                 }
             }
@@ -223,7 +223,7 @@ async fn main(_spawner: Spawner) {
 }
 
 /// Capture frames back-to-back and append the H.264 bitstream to
-/// `VID<idx>.H264` until `stop` is pressed or `MAX_FRAMES` is reached.
+/// `VID<idx>.264` until `stop` is pressed or `MAX_FRAMES` is reached.
 ///
 /// Returns the number of bytes written, or 0 if the file/encoder could not be
 /// set up.
@@ -238,7 +238,8 @@ async fn record_clip<'a, 'b>(
     let out: &'static mut [u8] = unsafe { core::slice::from_raw_parts_mut(OUT_BASE as *mut u8, OUT_SIZE) };
 
     let mut name = heapless::String::<13>::new();
-    let _ = write!(name, "VID{:04}.H264", file_idx);
+    // 8.3 only: the FAT layer rejects a 4-character `.H264` extension.
+    let _ = write!(name, "VID{:04}.264", file_idx);
 
     let volume = match volume_mgr.open_volume(VolumeIdx(0)) {
         Ok(v) => v,

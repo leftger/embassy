@@ -111,12 +111,26 @@ impl<'a, 'd> Encoder<'a, 'd> {
         let ret = unsafe { venc::JpegEncInit(&ffi, &mut inst) };
         ok_jpeg(ret)?;
 
+        // `JpegEncInit` does not latch the picture size: it leaves
+        // `preProcess.lumWidth/lumHeight`, `jpeg.width/height` and the input
+        // stride at zero, so the encoder must be told them explicitly. Without
+        // this the "encode" only emits a JFIF header (a few hundred bytes of
+        // valid-looking but empty JPEG).
+        let ret = unsafe { venc::JpegEncSetPictureSize(inst, &ffi) };
+        if ret != venc::JpegEncRet_JPEGENC_OK {
+            unsafe { venc::JpegEncRelease(inst) };
+            return Err(Error::from_jpeg(ret));
+        }
+
         Ok(Self { inst, _venc: _dev })
     }
 
     /// Encode one picture into `out`. Returns the JPEG byte length.
     pub fn encode(&mut self, frame: &Frame<'_>, out: &mut [u8]) -> Result<usize, Error> {
         let mut enc_in = venc::JpegEncIn::default();
+        // Emit the JFIF header. Without it the stream has no SOI/APP0 and is
+        // not a decodable JPEG.
+        enc_in.frameHeader = 1;
         enc_in.busLum = frame.luma.as_ptr() as usize;
         enc_in.pLum = frame.luma.as_ptr();
         if let Some((u, v)) = frame.chroma {

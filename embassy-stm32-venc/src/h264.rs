@@ -154,8 +154,18 @@ impl RefMode {
 /// H.264 encoder configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
+    /// Encoded (output) picture width in pixels, multiple of 4.
     pub width: u32,
+    /// Encoded (output) picture height in pixels, multiple of 2.
     pub height: u32,
+    /// Input picture width in pixels. Defaults to [`width`](Self::width).
+    ///
+    /// The encoder validates that the input picture covers the coded frame
+    /// (`xOffset + width <= input_width`), so this must be at least `width`.
+    /// Set it larger only if the encoder itself should crop/downscale.
+    pub input_width: u32,
+    /// Input picture height in pixels. Defaults to [`height`](Self::height).
+    pub input_height: u32,
     pub frame_rate_num: u32,
     pub frame_rate_denom: u32,
     pub ref_frame_amount: u32,
@@ -165,12 +175,14 @@ pub struct Config {
 }
 
 impl Config {
-    /// A sensible starting configuration for `width x height` at `fps` with one
-    /// reference frame and Annex-B byte-stream output.
+    /// A sensible starting configuration for a `width x height` input at `fps`
+    /// with one reference frame and Annex-B byte-stream output.
     pub fn new(width: u32, height: u32, fps: u32) -> Self {
         Self {
             width,
             height,
+            input_width: width,
+            input_height: height,
             frame_rate_num: fps,
             frame_rate_denom: 1,
             ref_frame_amount: 1,
@@ -212,6 +224,8 @@ impl<'f> Frame<'f> {
 /// H.264 encoder instance.
 pub struct Encoder<'a, 'd> {
     inst: venc::H264EncInst,
+    input_width: u32,
+    input_height: u32,
     _venc: &'a Venc<'d>,
 }
 
@@ -230,16 +244,28 @@ impl<'a, 'd> Encoder<'a, 'd> {
         let ret = unsafe { venc::H264EncInit(&ffi, &mut inst) };
         ok_h264(ret)?;
 
-        let mut me = Self { inst, _venc: dev };
+        let mut me = Self {
+            inst,
+            input_width: cfg.input_width,
+            input_height: cfg.input_height,
+            _venc: dev,
+        };
         me.set_pre_processing(cfg.input_type)?;
         Ok(me)
     }
 
-    /// Configure input pre-processing to accept `input` pictures.
+    /// Configure input pre-processing to accept `input` pictures of the size
+    /// given by [`Config::input_width`]/[`Config::input_height`].
+    ///
+    /// `origWidth`/`origHeight` must be filled in: the firmware rejects the
+    /// call when the input picture does not cover the coded frame, since
+    /// `origWidth == 0` fails its `xOffset + width <= origWidth` check.
     pub fn set_pre_processing(&mut self, input: PictureType) -> Result<(), Error> {
         let mut cfg = venc::H264EncPreProcessingCfg::default();
         ok_h264(unsafe { venc::H264EncGetPreProcessing(self.inst, &mut cfg) })?;
         cfg.inputType = input.to_ffi();
+        cfg.origWidth = self.input_width;
+        cfg.origHeight = self.input_height;
         ok_h264(unsafe { venc::H264EncSetPreProcessing(self.inst, &cfg) })
     }
 

@@ -310,8 +310,14 @@ pub unsafe extern "C" fn EWLGetInputLineBufferBase(_instance: *const c_void, inf
 /// Mirrors the polling branch of ST's `ewl_impl.c`: the ASIC status register is
 /// polled, status bits are cleared with the correct (write-one vs write-status)
 /// convention, and the input line-buffer handshake is acknowledged separately.
-/// `embassy-time` provides the timeout and `wfi` keeps the core idle while
-/// polling.
+/// `embassy-time` provides the timeout, which bounds the wait if the ASIC never
+/// signals.
+///
+/// The wait busy-polls rather than using `wfi`: `embassy-time` only arms its
+/// timer interrupt while an alarm is pending, so with nothing scheduled `wfi`
+/// would put the core to sleep past the ASIC completion (observed on hardware
+/// as a hang on the first `H264EncStrmEncode`). Encoding is a short, bursty
+/// busy period, so polling is the right trade-off here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn EWLWaitHwRdy(_inst: *const c_void, slices_ready: *mut u32) -> i32 {
     let clr_by_write1 = reg_read(BASE_HW_FUSE2) & venc::HWCFGIRQCLEARSUPPORT != 0;
@@ -356,6 +362,6 @@ pub unsafe extern "C" fn EWLWaitHwRdy(_inst: *const c_void, slices_ready: *mut u
             return venc::EWL_HW_WAIT_TIMEOUT as i32;
         }
 
-        cortex_m::asm::wfi();
+        core::hint::spin_loop();
     }
 }
