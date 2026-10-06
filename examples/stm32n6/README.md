@@ -24,6 +24,26 @@ cargo run --release --bin neochrom_graphics --no-default-features
 - `neochrom_lcd` — GPU-renders into double-buffered 800×480 RGB565 LTDC framebuffers in AXISRAM, driving the panel end-to-end.
 - `neochrom_graphics` — full 60 FPS dashboard: a `embedded-3dgfx` scene rasterized through the GPU2D, `embedded-gui` widgets, and a GPU-blitted text atlas. Runs at ~152 µs of GPU time per frame.
 
+## Video Encoder (VENC)
+
+- `venc_camera_to_sd` — IMX335 → CSI → DCMIPP → VENC → SD card. Captures RGB565 frames into AXI SRAM and runs them through the Hantro H.264/JPEG encoder: **B4** records an H.264 clip (`VID<NNNN>.H264`, Annex-B), **B2** writes a JPEG snapshot (`IMG<NNNN>.JPG`).
+
+The driver lives in [`embassy-stm32-venc`](../../embassy-stm32-venc), which implements the Hantro *Encoder Wrapper Layer* in Rust (VENC registers, a static arena, and an `embassy-time`-based hardware wait) on top of the `venc` bindings in `stm32-bindings`. ST ships the encoder as source rather than a prebuilt library, so the bindings are generated once before building:
+
+```bash
+# in a checkout of the stm32-bindings repo
+STM32CUBEN6_DIR=/path/to/STM32CubeN6 ./d build-venc   # vendor headers + build libvenc.a
+./d gen                                               # generate build/stm32-bindings
+```
+
+Then, with `embassy-stm32-venc`'s `stm32-bindings` path pointing at the generated crate:
+
+```bash
+cargo run --release --bin venc_camera_to_sd
+```
+
+The example places a 1.5 MiB EWL arena at `0x3420_0000` (AXISRAM3..6) and its frame/bitstream buffers in AXISRAM2 — see the file header for the exact map, and `embassy-stm32-venc`'s README for the driver's prerequisites (time driver, RIF/RISAF grants).
+
 ## Neural-ART NPU
 
 - `npu_mobilenet` — **real** NPU bring-up. Runs an ST Edge AI compiled MobileNetV1-0.25
