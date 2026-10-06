@@ -26,7 +26,8 @@ cargo run --release --bin neochrom_graphics --no-default-features
 
 ## Video Encoder (VENC)
 
-- `venc_camera_to_sd` — IMX335 → CSI → DCMIPP → VENC → SD card. Captures RGB565 frames into AXI SRAM and runs them through the Hantro H.264/JPEG encoder: **B4** records an H.264 clip (`VID<NNNN>.H264`, Annex-B), **B2** writes a JPEG snapshot (`IMG<NNNN>.JPG`).
+- `venc_camera_to_sd` — IMX335 → CSI → DCMIPP → VENC → SD card. Captures RGB565 frames into AXI SRAM and runs them through the Hantro H.264/JPEG encoder: **B4** records an H.264 clip (`VID<NNNN>.264`, Annex-B), **B2** writes a JPEG snapshot (`IMG<NNNN>.JPG`).
+- `venc_validate` — bring-up harness (opt-in, see below). Walks every rule in the encoder's `H264CheckCfg`/`SetParameter` — width/height limits and alignment, the scaled-output sub-rectangle, level vs macroblocks-per-picture, frame rate, reference-frame count vs view mode, and the RFC/SVCT capability gates — and asserts the documented accept/reject for each, then encodes one real frame per accepted non-default configuration.
 
 The driver lives in [`embassy-stm32-venc`](../../embassy-stm32-venc), which implements the Hantro *Encoder Wrapper Layer* in Rust (VENC registers, a static arena, and an `embassy-time`-based hardware wait) on top of the `venc` bindings in `stm32-bindings`. ST ships the encoder as source rather than a prebuilt library, so the bindings are generated once before building:
 
@@ -43,6 +44,14 @@ cargo run --release --bin venc_camera_to_sd
 ```
 
 The example places a 1.5 MiB EWL arena at `0x3420_0000` (AXISRAM3..6) and its frame/bitstream buffers in AXISRAM2 — see the file header for the exact map, and `embassy-stm32-venc`'s README for the driver's prerequisites (time driver, RIF/RISAF grants).
+
+`venc_validate` is gated behind the `venc-bringup` feature (like `npu_mobilenet` behind `npu-model`), so it stays out of the default build — it needs an STM32N6 with the VENC clocked to be meaningful:
+
+```bash
+cargo run --bin venc_validate --features venc-bringup
+```
+
+It prints one `PASS`/`FAIL` line per rule plus a summary, and needs no camera or SD card.
 
 ## Neural-ART NPU
 

@@ -67,10 +67,24 @@ board-nucleo = []
 # finish the network on the CPU (`embassy_stm32::npu::epoch`).
 npu-model = ["embassy-stm32/npu-nn"]
 
+# Builds `venc_validate`, a hardware bring-up harness that walks the VENC's
+# H.264 configuration checks (width/height limits, scaled output, level vs
+# frame size, frame rate, reference frames, and the RFC/SVCT capability gates)
+# and asserts the documented accept/reject for each. It needs an STM32N6 with
+# the VENC clocked to be useful, so like `npu_mobilenet` it is opt-in:
+#
+#     cargo run --bin venc_validate --features venc-bringup
+venc-bringup = []
+
 [[bin]]
 name = "npu_mobilenet"
 path = "src/bin/npu_mobilenet.rs"
 required-features = ["npu-model"]
+
+[[bin]]
+name = "venc_validate"
+path = "src/bin/venc_validate.rs"
+required-features = ["venc-bringup"]
 
 # cargo build/run
 [profile.dev]
