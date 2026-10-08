@@ -273,8 +273,21 @@ impl<'d> bt_hci::controller::Controller for ControllerAdapter<'d> {
         })
     }
 
-    async fn write_iso_data(&self, _packet: &bt_hci::data::IsoPacket<'_>) -> Result<(), Self::Error> {
-        todo!()
+    async fn write_iso_data(&self, packet: &bt_hci::data::IsoPacket<'_>) -> Result<(), Self::Error> {
+        use bt_hci::transport::{PacketToController, WithIndicator};
+
+        let mut controller = self.controller.borrow().borrow_mut();
+
+        // The stack takes a single 255-octet buffer, so an ISO packet plus its
+        // type indicator has to fit. For LC3 at 48 kHz/10 ms that is not in
+        // doubt, but a maximum-size PDU (251 octets) plus the four-octet ISO
+        // header and the indicator does not, and `write_hci` reports that rather
+        // than truncating.
+        controller.exec(|buf| {
+            WithIndicator::new(packet)
+                .write_hci(&mut buf[..])
+                .map_err(|_| embedded_io::ErrorKind::InvalidData)
+        })
     }
 
     async fn write_sync_data(&self, packet: &bt_hci::data::SyncPacket<'_>) -> Result<(), Self::Error> {
