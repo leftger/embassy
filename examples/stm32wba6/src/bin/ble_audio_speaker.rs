@@ -15,6 +15,10 @@
 #![no_std]
 #![no_main]
 
+#[cfg(feature = "ble-audio-codec-mngr")]
+use embassy_stm32_wpan::bindings::ble_audio::{
+    BAP_AudioCodecController_t, BAP_SupportedStandardCodec_t, CAP_EnableAudioCodecController,
+};
 #[cfg(not(feature = "ble-audio-codec-mngr"))]
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
@@ -82,7 +86,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 #[cfg(feature = "ble-audio-codec-mngr")]
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use panic_probe as _;
 use static_cell::StaticCell;
 
@@ -429,9 +433,15 @@ unsafe fn handle_data_path_setup(req: &BAP_SetupAudioDataPathReq_t) {
         .clamp(req.ControllerDelayMin, req.ControllerDelayMax);
 
     #[cfg(feature = "ble-audio-codec-mngr")]
-    let data_path_id = DataPathMode::SampleCircularBuffer as u8;
+    let (data_path_id, vendor_conf) = (DataPathMode::SampleCircularBuffer as u8, [16u8, 1u8]);
+    #[cfg(feature = "ble-audio-codec-mngr")]
+    let (conf_len, conf_ptr) = (vendor_conf.len() as u8, vendor_conf.as_ptr());
     #[cfg(not(feature = "ble-audio-codec-mngr"))]
-    let data_path_id = CODEC_DataPathID_t_DATA_PATH_HCI_LEGACY as u8;
+    let (data_path_id, conf_len, conf_ptr) = (
+        CODEC_DataPathID_t_DATA_PATH_HCI_LEGACY as u8,
+        0u8,
+        core::ptr::null(),
+    );
 
     let ret = unsafe {
         CAP_Unicast_SetupAudioDataPath(
@@ -439,8 +449,8 @@ unsafe fn handle_data_path_setup(req: &BAP_SetupAudioDataPathReq_t) {
             req.ASE_ID,
             data_path_id,
             ctrl_delay,
-            0,
-            core::ptr::null(),
+            conf_len,
+            conf_ptr,
         )
     };
     info!(
@@ -519,6 +529,82 @@ fn scale_and_upsample_to_48k(src: &[i16], src_rate_hz: u16, out: &mut [u16]) -> 
     written
 }
 
+struct PlaybackStats {
+    last_log: Instant,
+    rx_ok: u32,
+    plc: u32,
+    overruns: u32,
+    peak: i16,
+    max_dec_us: u32,
+}
+
+impl PlaybackStats {
+    fn new() -> Self {
+        Self {
+            last_log: Instant::now(),
+            rx_ok: 0,
+            plc: 0,
+            overruns: 0,
+            peak: 0,
+            max_dec_us: 0,
+        }
+    }
+
+    fn record_frame(&mut self, valid: bool, pcm: &[i16], dec_us: u32) {
+        if valid {
+            self.rx_ok += 1;
+        } else {
+            self.plc += 1;
+        }
+        self.max_dec_us = self.max_dec_us.max(dec_us);
+        for &s in pcm {
+            let abs = s.saturating_abs();
+            if abs > self.peak {
+                self.peak = abs;
+            }
+        }
+    }
+
+    fn maybe_log(&mut self) {
+        if self.last_log.elapsed() >= Duration::from_secs(1) {
+            info!(
+                "Audio stats/1s: ok={} plc={} overrun={} peak={} max_dec={}us",
+                self.rx_ok, self.plc, self.overruns, self.peak, self.max_dec_us
+            );
+            self.rx_ok = 0;
+            self.plc = 0;
+            self.overruns = 0;
+            self.peak = 0;
+            self.max_dec_us = 0;
+            self.last_log = Instant::now();
+        }
+    }
+}
+
+async fn write_sai_frame(sai_tx: &mut Sai<'static, u16>, started: &mut bool, samples: &[u16]) -> bool {
+    if samples.is_empty() {
+        return true;
+    }
+    if !*started {
+        // Prefill one silent frame before the first audio frame (~20 ms lead in the 2048-sample ring)
+        // so DMA cannot overtake the write pointer across initial CIS/decode jitter.
+        let lead_silence = [0u16; 480];
+        let _ = sai_tx.write(&lead_silence[..samples.len().min(lead_silence.len())]).await;
+        let _ = sai_tx.write(samples).await;
+        sai_tx.start();
+        *started = true;
+        return true;
+    }
+    if let Err(e) = sai_tx.write(samples).await {
+        warn!("SAI write error: {:?}; resetting ring", e);
+        sai_tx.stop();
+        sai_tx.clear();
+        *started = false;
+        return false;
+    }
+    true
+}
+
 #[cfg(not(feature = "ble-audio-codec-mngr"))]
 #[embassy_executor::task]
 async fn audio_playback_task(mut sai_tx: Sai<'static, u16>) {
@@ -526,6 +612,7 @@ async fn audio_playback_task(mut sai_tx: Sai<'static, u16>) {
     let mut pcm_out = [0u16; 480];
     let mut started = false;
     let mut src_samples = 480usize;
+    let mut stats = PlaybackStats::new();
 
     loop {
         if !STREAMING_ACTIVE.load(Ordering::Acquire) {
@@ -547,13 +634,22 @@ async fn audio_playback_task(mut sai_tx: Sai<'static, u16>) {
             );
         }
 
-        let mut frame = match embassy_time::with_timeout(Duration::from_millis(15), ISO_RX_QUEUE.receive()).await {
-            Ok(f) => f,
-            Err(_) => IsoSduFrame::empty(), // Run PLC on missed SDU deadline
+        let mut frame = if !started {
+            // Wait for the first ISO SDU before starting SAI DMA so we don't drain an empty lead.
+            match embassy_time::with_timeout(Duration::from_millis(50), ISO_RX_QUEUE.receive()).await {
+                Ok(f) => f,
+                Err(_) => continue,
+            }
+        } else {
+            match embassy_time::with_timeout(Duration::from_millis(15), ISO_RX_QUEUE.receive()).await {
+                Ok(f) => f,
+                Err(_) => IsoSduFrame::empty(), // Run PLC on missed SDU deadline
+            }
         };
 
         let bfi = if frame.valid { 0 } else { 1 };
         let frame_ns = src_samples.min(pcm_in.len());
+        let t0 = Instant::now();
 
         unsafe {
             let dec = core::ptr::addr_of_mut!(LC3_WORK.decoder) as *mut c_void;
@@ -570,14 +666,13 @@ async fn audio_playback_task(mut sai_tx: Sai<'static, u16>) {
 
         let freq_hz = STREAM_FREQ_HZ.load(Ordering::Acquire);
         let out_len = scale_and_upsample_to_48k(&pcm_in[..frame_ns], freq_hz, &mut pcm_out);
+        let dec_us = t0.elapsed().as_micros() as u32;
+        stats.record_frame(frame.valid, &pcm_in[..frame_ns], dec_us);
 
-        if !started {
-            let _ = sai_tx.write(&pcm_out[..out_len]).await;
-            sai_tx.start();
-            started = true;
-        } else if let Err(e) = sai_tx.write(&pcm_out[..out_len]).await {
-            warn!("SAI write error: {:?}", e);
+        if !write_sai_frame(&mut sai_tx, &mut started, &pcm_out[..out_len]).await {
+            stats.overruns += 1;
         }
+        stats.maybe_log();
     }
 }
 
@@ -587,6 +682,7 @@ async fn audio_playback_task(mut sai_tx: Sai<'static, u16>) {
     let mut pcm_in = [0i16; 480];
     let mut pcm_out = [0u16; 480];
     let mut started = false;
+    let mut stats = PlaybackStats::new();
 
     loop {
         if !STREAMING_ACTIVE.load(Ordering::Acquire) {
@@ -601,7 +697,7 @@ async fn audio_playback_task(mut sai_tx: Sai<'static, u16>) {
         }
 
         if !started {
-            if embassy_time::with_timeout(Duration::from_millis(50), CODEC_SYNC_TRIGGER.wait())
+            if embassy_time::with_timeout(Duration::from_millis(200), CODEC_SYNC_TRIGGER.wait())
                 .await
                 .is_err()
             {
@@ -616,17 +712,17 @@ async fn audio_playback_task(mut sai_tx: Sai<'static, u16>) {
         let freq_hz = STREAM_FREQ_HZ.load(Ordering::Acquire);
         let frame_us = STREAM_FRAME_US.load(Ordering::Acquire);
         let frame_ns = ((freq_hz as usize * frame_us as usize) / 1_000_000).min(pcm_in.len());
+        let t0 = Instant::now();
 
         codec_mngr::receive_data(cis, DataPathMode::SampleCircularBuffer, &mut pcm_in[..frame_ns]);
         let out_len = scale_and_upsample_to_48k(&pcm_in[..frame_ns], freq_hz, &mut pcm_out);
+        let dec_us = t0.elapsed().as_micros() as u32;
+        stats.record_frame(true, &pcm_in[..frame_ns], dec_us);
 
-        if !started {
-            let _ = sai_tx.write(&pcm_out[..out_len]).await;
-            sai_tx.start();
-            started = true;
-        } else if let Err(e) = sai_tx.write(&pcm_out[..out_len]).await {
-            warn!("SAI write error: {:?}", e);
+        if !write_sai_frame(&mut sai_tx, &mut started, &pcm_out[..out_len]).await {
+            stats.overruns += 1;
         }
+        stats.maybe_log();
     }
 }
 
@@ -700,6 +796,23 @@ fn init_le_audio_profiles() {
             &csip_cfg,
         );
         info!("CAP_Init -> 0x{:02X}", st);
+
+        #[cfg(feature = "ble-audio-codec-mngr")]
+        {
+            static mut CONTROLLER_STD_CODEC: [BAP_SupportedStandardCodec_t; 1] = [BAP_SupportedStandardCodec_t {
+                CodingFormat: AUDIO_CODING_FORMAT_LC3 as u8,
+                TransportMask: 0x03,
+            }];
+            static mut CONTROLLER_CODEC_LIST: BAP_AudioCodecController_t = BAP_AudioCodecController_t {
+                NumStandardCodecs: 1,
+                pStandardCodec: core::ptr::null_mut(),
+                NumVendorSpecificCodecs: 0,
+                pVendorSpecificCodec: core::ptr::null_mut(),
+            };
+            CONTROLLER_CODEC_LIST.pStandardCodec = core::ptr::addr_of_mut!(CONTROLLER_STD_CODEC) as *mut _;
+            let st_codec = CAP_EnableAudioCodecController(core::ptr::addr_of_mut!(CONTROLLER_CODEC_LIST));
+            info!("CAP_EnableAudioCodecController -> 0x{:02X}", st_codec);
+        }
 
         // Register Mono LC3 Sink PAC Record (16/24/48 kHz, 7.5/10 ms, 30..=155 bytes/frame).
         let freq_mask = (SUPPORTED_SAMPLE_FREQ_16000_HZ
@@ -831,8 +944,12 @@ async fn main(spawner: Spawner) {
 
     // ── SAI1 + MAX98357A Output Setup (48 kHz, 16-bit Mono I2S) ───────────────
     let (sai_a, _sai_b) = sai::split_subblocks(p.SAI1);
-    static SAI_DMA_BUF: StaticCell<[u16; 2048]> = StaticCell::new();
-    let sai_dma_buf = SAI_DMA_BUF.init([0u16; 2048]);
+    #[cfg(feature = "ble-audio-codec-mngr")]
+    const SAI_DMA_SAMPLES: usize = 960; // 2 x 10 ms frames so HT/TC IRQs pace CODEC_ReceiveData at 10 ms
+    #[cfg(not(feature = "ble-audio-codec-mngr"))]
+    const SAI_DMA_SAMPLES: usize = 2048;
+    static SAI_DMA_BUF: StaticCell<[u16; SAI_DMA_SAMPLES]> = StaticCell::new();
+    let sai_dma_buf = SAI_DMA_BUF.init([0u16; SAI_DMA_SAMPLES]);
 
     let mut sai_cfg = sai::Config::default();
     sai_cfg.mode = sai::Mode::Master;
@@ -901,12 +1018,14 @@ async fn main(spawner: Spawner) {
     start_le_audio_ext_advertising();
 
     let mut event_buf = EventBuffer::new();
+    let mut active_acl_handle: Option<u16> = None;
     loop {
         let event = ble.read_event(&mut event_buf).await;
         if let Some(gap_event) = ble.process_event(&event).await {
             match gap_event {
                 GapEvent::Connected(conn) => {
                     let h = conn.handle.raw();
+                    active_acl_handle = Some(h);
                     let (mut tx_phy, mut rx_phy) = (0u8, 0u8);
                     let st_r1 = unsafe { hci_le_read_phy(h, &mut tx_phy, &mut rx_phy) };
                     let st_set = unsafe { hci_le_set_phy(h, 0x00, 0x02, 0x02, 0) };
@@ -929,9 +1048,12 @@ async fn main(spawner: Spawner) {
                         handle.raw(),
                         reason.as_u8()
                     );
-                    STREAMING_ACTIVE.store(false, Ordering::Release);
-                    STREAM_CIS_HANDLE.store(0xFFFF, Ordering::Release);
-                    start_le_audio_ext_advertising();
+                    if active_acl_handle == Some(handle.raw()) {
+                        active_acl_handle = None;
+                        STREAMING_ACTIVE.store(false, Ordering::Release);
+                        STREAM_CIS_HANDLE.store(0xFFFF, Ordering::Release);
+                        start_le_audio_ext_advertising();
+                    }
                 }
                 _ => {}
             }

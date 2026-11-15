@@ -17,11 +17,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use stm32_bindings::bindings::wba_ble_audio::{
-    AUDIO_CalibrationClbk, AUDIO_RegisterStream, AUDIO_SyncEventClbk, AUDIO_UnregisterStream, CODEC_ConfigureDataPath,
-    CODEC_DataPathID_t_DATA_PATH_HCI_LEGACY, CODEC_ReadLocalSupportedCodecCapabilies,
-    CODEC_ReadLocalSupportedCodecsV2, CODEC_ReadLocalSupportedControllerDelay, CODEC_ReceiveMediaPacket,
-    CODEC_RemoveIsoDataPath, CODEC_SetupIsoDataPath, CODEC_SetupIsoDataPathCmd_t, DATA_PATH_HCI, DATA_PATH_INPUT,
-    DATA_PATH_OUTPUT, MAX_PATH_NB, codec_rcv_status_t_CODEC_RCV_STATUS_BUSY,
+    AUDIO_CODING_FORMAT_TRANSPARENT, AUDIO_CalibrationClbk, AUDIO_RegisterStream, AUDIO_SyncEventClbk,
+    AUDIO_UnregisterStream, CODEC_ConfigureDataPath, CODEC_DataPathID_t_DATA_PATH_HCI_LEGACY,
+    CODEC_ReadLocalSupportedCodecCapabilies, CODEC_ReadLocalSupportedCodecsV2, CODEC_ReadLocalSupportedControllerDelay,
+    CODEC_ReceiveMediaPacket, CODEC_RemoveIsoDataPath, CODEC_SetupIsoDataPath, CODEC_SetupIsoDataPathCmd_t,
+    DATA_PATH_HCI, DATA_PATH_INPUT, DATA_PATH_OUTPUT, MAX_PATH_NB, codec_rcv_status_t_CODEC_RCV_STATUS_BUSY,
     codec_rcv_status_t_CODEC_RCV_STATUS_FAIL, codec_rcv_status_t_CODEC_RCV_STATUS_OK, grp_type_t_GRP_TYPE_BIG,
     grp_type_t_GRP_TYPE_CIG, iso_sdu_fragment_t_FIRST_SDU_FRAG, iso_sdu_fragment_t_FULL_SDU_FRAG,
 };
@@ -51,6 +51,7 @@ struct StreamPath {
     conn_handle: u16,
     input_path_id: Option<u8>,
     output_path_id: Option<u8>,
+    rx_busy: bool,
 }
 
 impl StreamPath {
@@ -59,6 +60,7 @@ impl StreamPath {
             conn_handle: 0,
             input_path_id: None,
             output_path_id: None,
+            rx_busy: false,
         }
     }
 
@@ -94,6 +96,20 @@ impl CodecBridgeState {
         self.streams
             .iter()
             .find(|s| !s.is_empty() && s.conn_handle == conn_handle)
+    }
+
+    fn is_rx_busy(&self, conn_handle: u16) -> bool {
+        self.find_stream(conn_handle).is_some_and(|s| s.rx_busy)
+    }
+
+    fn set_rx_busy(&mut self, conn_handle: u16, busy: bool) {
+        if let Some(slot) = self
+            .streams
+            .iter_mut()
+            .find(|s| !s.is_empty() && s.conn_handle == conn_handle)
+        {
+            slot.rx_busy = busy;
+        }
     }
 
     fn set_stream_path(&mut self, conn_handle: u16, direction: u8, path_id: u8) -> bool {
@@ -265,7 +281,7 @@ pub(crate) fn on_hci_event(packet: &[u8]) {
                 let mut cig_info = ble_intf_get_cig_info_st::default();
                 let status = unsafe { ll_intf_get_cig_info(cis_handle, &mut cig_info) };
                 if status == BLE_STATUS_SUCCESS {
-                    unsafe {
+                    let _ = unsafe {
                         AUDIO_RegisterStream(
                             grp_type_t_GRP_TYPE_CIG,
                             cig_info.cig_id,
@@ -275,8 +291,8 @@ pub(crate) fn on_hci_event(packet: &[u8]) {
                             cig_info.role,
                             cig_info.trsnprt_ltncy_m_to_s,
                             cig_info.trsnprt_ltncy_s_to_m,
-                        );
-                    }
+                        )
+                    };
                 }
             }
         }
@@ -334,33 +350,51 @@ fn register_big_handles(big_handle: u8, handle_bytes: &[u8], num_bis: usize, iso
     }
 }
 
-/// Forward a single received LL ISO SDU buffer into `CODEC_ReceiveMediaPacket`.
-/// Returns `Ok(true)` if consumed by Codec Manager, `Ok(false)` if busy, `Err` on failure.
-unsafe fn try_deliver_rx_sdu(conn_handle: u16, ptr_sdu: iso_sdu_buf_hdr_p) -> Result<bool, ()> {
-    if ptr_sdu.is_null() {
-        return Err(());
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum DeliverStatus {
+    Ok,
+    Busy,
+    Fail,
+}
+
+/// Forward a received LL ISO SDU (and any chained fragments) into `CODEC_ReceiveMediaPacket`.
+/// Payload follows the LL `ptr_sdu_buffer` layout: 3 u32 words header when `ts_flag == 1`, else 2.
+unsafe fn try_deliver_rx_sdu(conn_handle: u16, ptr_sdu: iso_sdu_buf_hdr_p) -> DeliverStatus {
+    let mut cur = ptr_sdu;
+    let mut result = DeliverStatus::Ok;
+    while !cur.is_null() {
+        let sdu = unsafe { &*cur };
+        let is_first = cur == ptr_sdu
+            && (sdu.pb_flag == iso_sdu_fragment_t_FIRST_SDU_FRAG || sdu.pb_flag == iso_sdu_fragment_t_FULL_SDU_FRAG);
+        let (ts_flag, offset_words) = if is_first { (1u8, 3usize) } else { (0u8, 2usize) };
+        let data = if sdu.ptr_sdu_buffer.is_null() {
+            core::ptr::null_mut()
+        } else {
+            unsafe { sdu.ptr_sdu_buffer.add(offset_words).cast::<u8>() }
+        };
+        let status = unsafe {
+            CODEC_ReceiveMediaPacket(
+                conn_handle,
+                sdu.pb_flag,
+                ts_flag,
+                sdu.time_stamp,
+                sdu.pkt_sqnc_num,
+                sdu.pkt_status_flag,
+                sdu.iso_sdu_len,
+                data,
+            )
+        };
+        result = match status {
+            x if x == codec_rcv_status_t_CODEC_RCV_STATUS_OK => DeliverStatus::Ok,
+            x if x == codec_rcv_status_t_CODEC_RCV_STATUS_BUSY => DeliverStatus::Busy,
+            _ => DeliverStatus::Fail,
+        };
+        if result != DeliverStatus::Ok {
+            break;
+        }
+        cur = sdu.ptr_nxt_sdu_buff_hdr;
     }
-    let sdu = unsafe { &*ptr_sdu };
-    let ts_flag = u8::from(
-        sdu.pb_flag == iso_sdu_fragment_t_FIRST_SDU_FRAG || sdu.pb_flag == iso_sdu_fragment_t_FULL_SDU_FRAG,
-    );
-    let status = unsafe {
-        CODEC_ReceiveMediaPacket(
-            conn_handle,
-            sdu.pb_flag,
-            ts_flag,
-            sdu.time_stamp,
-            sdu.pkt_sqnc_num,
-            sdu.pkt_status_flag,
-            sdu.iso_sdu_len,
-            sdu.ptr_sdu_buffer.cast::<u8>(),
-        )
-    };
-    match status {
-        x if x == codec_rcv_status_t_CODEC_RCV_STATUS_OK => Ok(true),
-        x if x == codec_rcv_status_t_CODEC_RCV_STATUS_BUSY => Ok(false),
-        _ => Err(()),
-    }
+    result
 }
 
 /// Vendor-specific LL output path callback invoked in LL context for streams
@@ -370,16 +404,32 @@ unsafe extern "C" fn rx_iso_data_vendor_clbk(ptr_sdu: iso_sdu_buf_hdr_p, conn_ha
         return;
     }
 
-    let consumed_or_err = unsafe { try_deliver_rx_sdu(conn_handle, ptr_sdu) };
-    match consumed_or_err {
-        Ok(true) => unsafe { ll_intf_free_iso_sdu(ptr_sdu) },
-        Ok(false) => {
-            let queued = BRIDGE_STATE.lock(|cell| cell.borrow_mut().push_rx_sdu(conn_handle, ptr_sdu));
+    let is_busy = BRIDGE_STATE.lock(|cell| cell.borrow().is_rx_busy(conn_handle));
+    if is_busy {
+        let queued = BRIDGE_STATE.lock(|cell| cell.borrow_mut().push_rx_sdu(conn_handle, ptr_sdu));
+        if !queued {
+            unsafe { ll_intf_free_iso_sdu(ptr_sdu) };
+        }
+        return;
+    }
+
+    let st = unsafe { try_deliver_rx_sdu(conn_handle, ptr_sdu) };
+    match st {
+        DeliverStatus::Ok => unsafe { ll_intf_free_iso_sdu(ptr_sdu) },
+        DeliverStatus::Busy => {
+            BRIDGE_STATE.lock(|cell| cell.borrow_mut().set_rx_busy(conn_handle, true));
+            unsafe { ll_intf_free_iso_sdu(ptr_sdu) };
+        }
+        DeliverStatus::Fail => {
+            let queued = BRIDGE_STATE.lock(|cell| {
+                let mut b = cell.borrow_mut();
+                b.set_rx_busy(conn_handle, true);
+                b.push_rx_sdu(conn_handle, ptr_sdu)
+            });
             if !queued {
                 unsafe { ll_intf_free_iso_sdu(ptr_sdu) };
             }
         }
-        Err(()) => unsafe { ll_intf_free_iso_sdu(ptr_sdu) },
     }
 }
 
@@ -439,7 +489,8 @@ pub unsafe extern "C" fn BLECB_ReadLocalSupportedCodecs(
     };
     if status == HCI_SUCCESS_ERR_CODE as u8 {
         if !std_codec.is_null() && !std_ptr.is_null() && !num_supported_std_codecs.is_null() {
-            let n = unsafe { *num_supported_std_codecs } as usize;
+            // Each standard codec entry is 2 bytes: CodingFormat (1B) + TransportMask (1B).
+            let n = (unsafe { *num_supported_std_codecs } as usize) * 2;
             unsafe { core::ptr::copy_nonoverlapping(std_ptr, std_codec, n) };
         }
         if !vs_codec.is_null() && !vs_ptr.is_null() && !num_supported_vs_codecs.is_null() {
@@ -629,9 +680,26 @@ pub unsafe extern "C" fn BLECB_SetupIsoDataPath(
         return codec_status;
     }
 
-    let ll_status = unsafe { ll_intf_setup_iso_data_path(conn_handle, &mut ll_params) };
-    if ll_status == HCI_SUCCESS_ERR_CODE && data_path_direction as u32 == DATA_PATH_OUTPUT {
-        unsafe { ll_intf_set_output_data_path(conn_handle, Some(rx_iso_data_vendor_clbk)) };
+    let ll_status = if data_path_direction as u32 == DATA_PATH_OUTPUT {
+        unsafe { ll_intf_set_output_data_path(conn_handle, Some(rx_iso_data_vendor_clbk)) }
+    } else {
+        ll_params.codec_id = [AUDIO_CODING_FORMAT_TRANSPARENT as u8, 0, 0, 0, 0];
+        ll_params.codec_config_length = 0;
+        ll_params.codec_config = core::ptr::null_mut();
+        unsafe { ll_intf_setup_iso_data_path(conn_handle, &mut ll_params) }
+    };
+    if ll_status != HCI_SUCCESS_ERR_CODE {
+        BRIDGE_STATE.lock(|cell| {
+            let dir_mask = if data_path_direction as u32 == DATA_PATH_INPUT {
+                DIR_MASK_INPUT
+            } else {
+                DIR_MASK_OUTPUT
+            };
+            let _ = cell.borrow_mut().take_removed_codec_dirs(conn_handle, dir_mask);
+        });
+        unsafe {
+            let _ = CODEC_RemoveIsoDataPath(conn_handle, data_path_direction);
+        }
     }
     ll_status as u8
 }
@@ -748,12 +816,17 @@ pub unsafe extern "C" fn CODEC_CB_ReceiveMediaPacketReady(iso_con_hdl: u16) {
     loop {
         let next = BRIDGE_STATE.lock(|cell| cell.borrow_mut().pop_next_rx_sdu(iso_con_hdl));
         let Some(ptr_sdu) = next else {
+            BRIDGE_STATE.lock(|cell| cell.borrow_mut().set_rx_busy(iso_con_hdl, false));
             break;
         };
 
         match unsafe { try_deliver_rx_sdu(iso_con_hdl, ptr_sdu) } {
-            Ok(true) | Err(()) => unsafe { ll_intf_free_iso_sdu(ptr_sdu) },
-            Ok(false) => {
+            DeliverStatus::Ok => unsafe { ll_intf_free_iso_sdu(ptr_sdu) },
+            DeliverStatus::Busy => {
+                unsafe { ll_intf_free_iso_sdu(ptr_sdu) };
+                break;
+            }
+            DeliverStatus::Fail => {
                 // Restore at front to preserve FIFO order until space opens.
                 let pushed = BRIDGE_STATE.lock(|cell| cell.borrow_mut().push_front_rx_sdu(iso_con_hdl, ptr_sdu));
                 if !pushed {

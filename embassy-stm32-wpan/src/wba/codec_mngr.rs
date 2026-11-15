@@ -247,24 +247,6 @@ pub fn init<
         config.core_clock_khz,
     );
 
-    let mut pll_cfg = AUDIO_PLLConfig_t {
-        PLLTargetFreq: config.pll_config.target_freq_hz,
-        VCOInputFreq: config.pll_config.vco_input_freq_hz,
-        PLLOutputDiv: config.pll_config.output_div,
-    };
-    let mut corr_cfg = AUDIO_CorrectorConfig_t {
-        initialMinSampling: config.corrector_config.initial_min_sampling_ms,
-        minSampling: config.corrector_config.min_sampling_ms,
-        mode: config.corrector_config.mode,
-    };
-
-    let corr_status = unsafe { AUDIO_InitializeClockCorrector(&mut pll_cfg, &mut corr_cfg) };
-    if corr_status != codec_status_t_CODEC_STATUS_SUCCESS {
-        codec_if::deinit();
-        INITIALIZED.store(false, Ordering::Release);
-        return Err(CodecMngrError::ClockCorrectorInitFailed);
-    }
-
     let mut codec_mode = 0u8;
     if config.flow_control {
         codec_mode |= CODEC_MODE_FLOW_CTRL as u8;
@@ -280,6 +262,8 @@ pub fn init<
     let media_ptr = pool.media_pool.as_mut_ptr();
     let media_len = pool.media_pool.len() as u32;
 
+    // Initialize CODEC_ManagerInit (which calls CODEC_ManagerReset and clears FreqCorrector)
+    // before CODEC_CLK_Init + AUDIO_InitializeClockCorrector.
     let status = unsafe {
         CODEC_ManagerInit(
             media_len,
@@ -291,10 +275,36 @@ pub fn init<
         )
     };
     if status != codec_status_t_CODEC_STATUS_SUCCESS {
-        unsafe { AUDIO_DeinitializeClockCorrector() };
         codec_if::deinit();
         INITIALIZED.store(false, Ordering::Release);
         return Err(CodecMngrError::CodecManagerInitFailed);
+    }
+
+    let clk_status = unsafe { codec_if::CODEC_CLK_Init() };
+    if clk_status != 0 {
+        unsafe { CODEC_ManagerReset() };
+        codec_if::deinit();
+        INITIALIZED.store(false, Ordering::Release);
+        return Err(CodecMngrError::ClockCorrectorInitFailed);
+    }
+
+    let mut pll_cfg = AUDIO_PLLConfig_t {
+        PLLTargetFreq: config.pll_config.target_freq_hz,
+        VCOInputFreq: config.pll_config.vco_input_freq_hz,
+        PLLOutputDiv: config.pll_config.output_div,
+    };
+    let mut corr_cfg = AUDIO_CorrectorConfig_t {
+        initialMinSampling: config.corrector_config.initial_min_sampling_ms,
+        minSampling: config.corrector_config.min_sampling_ms,
+        mode: config.corrector_config.mode,
+    };
+
+    let corr_status = unsafe { AUDIO_InitializeClockCorrector(&mut pll_cfg, &mut corr_cfg) };
+    if corr_status != codec_status_t_CODEC_STATUS_SUCCESS {
+        unsafe { CODEC_ManagerReset() };
+        codec_if::deinit();
+        INITIALIZED.store(false, Ordering::Release);
+        return Err(CodecMngrError::ClockCorrectorInitFailed);
     }
 
     ble_codec::set_active(true);
