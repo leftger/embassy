@@ -26,8 +26,10 @@ use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::sai::{self, Sai};
 use embassy_stm32::{Config, bind_interrupts, dma, peripherals, rcc};
 use embassy_stm32_wpan::bindings::ble::{
-    Adv_Set_t, HCI_ADV_EVENT_PROP_CONNECTABLE, HCI_ADV_TYPE_ADV_IND, aci_gap_adv_set_configuration,
+    Adv_Set_t, HCI_ADV_EVENT_PROP_CONNECTABLE, HCI_ADV_EVENT_PROP_LEGACY,
+    HCI_ADV_EVENT_PROP_SCANNABLE, HCI_ADV_TYPE_ADV_IND, aci_gap_adv_set_configuration,
     hci_le_set_extended_advertising_data, hci_le_set_extended_advertising_enable,
+    hci_le_set_extended_scan_response_data,
 };
 #[cfg(not(feature = "ble-audio-codec-mngr"))]
 use embassy_stm32_wpan::bindings::ble::BLE_STATUS_SUCCESS;
@@ -45,7 +47,7 @@ use embassy_stm32_wpan::bindings::ble_audio::{
     CAP_NotCode_t_CAP_UNICAST_PREFERRED_QOS_REQ_EVT,
     CAP_NotCode_t_CAP_UNICAST_SERVER_ASE_STATE_EVT,
     CAP_NotCode_t_CAP_UNICAST_SERVER_ENABLE_REQ_EVT, CAP_NotCode_t_CAP_VCP_META_EVT,
-    CAP_Notification_Evt_t, CAP_ROLE_ACCEPTOR, CAP_RegisterSnkPACRecord,
+    CAP_Notification_Evt_t, CAP_ROLE_ACCEPTOR, CAP_RegisterAudioChannels, CAP_RegisterSnkPACRecord,
     CAP_SetAvailableAudioContexts, CAP_SetSnkAudioLocations, CAP_SetSupportedAudioContexts,
     CAP_Unicast_EnableOpRsp, CAP_Unicast_SetupAudioDataPath, CCP_Config_t,
     CODEC_CAP_AUDIO_CHNL_COUNTS, CODEC_CAP_FRAME_DURATION, CODEC_CAP_OCTETS_PER_CODEC_FRAME,
@@ -747,32 +749,36 @@ fn init_le_audio_profiles() {
         let _ = CAP_SetSnkAudioLocations(0x0000_0000); // Mono
         let _ = CAP_SetSupportedAudioContexts(ctx_mask, 0);
         let _ = CAP_SetAvailableAudioContexts(ctx_mask, 0);
+
+        let st = CAP_RegisterAudioChannels(1, 0);
+        info!("CAP_RegisterAudioChannels(1, 0) -> 0x{:02X}", st);
     }
 }
 
 fn start_le_audio_ext_advertising() {
     let name = b"WBA6_Speaker";
-    let mut adv = [0u8; 64];
+    let mut adv = [0u8; 31];
     // Flags AD type
     adv[0] = 2;
     adv[1] = 0x01;
     adv[2] = 0x06; // LE General Discoverable | BR/EDR Not Supported
-    // Complete Local Name AD type
-    adv[3] = (1 + name.len()) as u8;
-    adv[4] = 0x09;
-    adv[5..5 + name.len()].copy_from_slice(name);
-    let prefix_len = 5 + name.len();
 
     let cap_len = unsafe {
         CAP_BuildAdvPacket(
             0, // General Announcement
             core::ptr::null(),
             0,
-            adv[prefix_len..].as_mut_ptr(),
-            (adv.len() - prefix_len) as u8,
+            adv[3..].as_mut_ptr(),
+            (adv.len() - 3) as u8,
         )
     } as usize;
-    let total_len = prefix_len + cap_len;
+    let total_len = 3 + cap_len;
+
+    let mut scan_rsp = [0u8; 31];
+    scan_rsp[0] = (1 + name.len()) as u8;
+    scan_rsp[1] = 0x09; // Complete Local Name
+    scan_rsp[2..2 + name.len()].copy_from_slice(name);
+    let scan_rsp_len = 2 + name.len();
 
     let peer_addr = [0u8; 6];
     let adv_set = Adv_Set_t {
@@ -780,16 +786,18 @@ fn start_le_audio_ext_advertising() {
         Duration: 0,
         Max_Extended_Advertising_Events: 0,
     };
+    let adv_props =
+        (HCI_ADV_EVENT_PROP_CONNECTABLE | HCI_ADV_EVENT_PROP_SCANNABLE | HCI_ADV_EVENT_PROP_LEGACY) as u16;
 
     unsafe {
         let st_cfg = aci_gap_adv_set_configuration(
             HCI_ADV_TYPE_ADV_IND as u8,
             0,
-            HCI_ADV_EVENT_PROP_CONNECTABLE as u16,
+            adv_props,
             0x0080,
             0x00A0,
             0x07,
-            0x00, // Public address
+            0x01, // Static random address (matches HCI::new default)
             0x00,
             peer_addr.as_ptr(),
             0x00, // No filter list
@@ -800,10 +808,11 @@ fn start_le_audio_ext_advertising() {
             0,
         );
         let st_data = hci_le_set_extended_advertising_data(0, 0x03, 0, total_len as u8, adv.as_ptr());
+        let st_srsp = hci_le_set_extended_scan_response_data(0, 0x03, 0, scan_rsp_len as u8, scan_rsp.as_ptr());
         let st_en = hci_le_set_extended_advertising_enable(1, 1, &adv_set);
         info!(
-            "LE Audio Ext Adv started: cfg=0x{:02X} data=0x{:02X} en=0x{:02X} ({}B)",
-            st_cfg, st_data, st_en, total_len
+            "LE Audio Adv started: cfg=0x{:02X} data=0x{:02X} srsp=0x{:02X} en=0x{:02X} (adv={}B srsp={}B)",
+            st_cfg, st_data, st_srsp, st_en, total_len, scan_rsp_len
         );
     }
 }
