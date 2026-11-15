@@ -26,10 +26,9 @@ use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::sai::{self, Sai};
 use embassy_stm32::{Config, bind_interrupts, dma, peripherals, rcc};
 use embassy_stm32_wpan::bindings::ble::{
-    Adv_Set_t, HCI_ADV_EVENT_PROP_CONNECTABLE, HCI_ADV_EVENT_PROP_LEGACY,
-    HCI_ADV_EVENT_PROP_SCANNABLE, HCI_ADV_TYPE_ADV_IND, aci_gap_adv_set_configuration,
-    hci_le_set_extended_advertising_data, hci_le_set_extended_advertising_enable,
-    hci_le_set_extended_scan_response_data,
+    Adv_Set_t, HCI_ADV_EVENT_PROP_CONNECTABLE, HCI_ADV_TYPE_ADV_IND, aci_gap_adv_set_configuration,
+    hci_le_read_phy, hci_le_set_default_phy, hci_le_set_extended_advertising_data,
+    hci_le_set_extended_advertising_enable, hci_le_set_phy,
 };
 #[cfg(not(feature = "ble-audio-codec-mngr"))]
 use embassy_stm32_wpan::bindings::ble::BLE_STATUS_SUCCESS;
@@ -757,28 +756,27 @@ fn init_le_audio_profiles() {
 
 fn start_le_audio_ext_advertising() {
     let name = b"WBA6_Speaker";
-    let mut adv = [0u8; 31];
+    let mut adv = [0u8; 64];
     // Flags AD type
     adv[0] = 2;
     adv[1] = 0x01;
     adv[2] = 0x06; // LE General Discoverable | BR/EDR Not Supported
+    // Complete Local Name AD type (>31B combined with CAP packet -> forces Extended Adv)
+    adv[3] = (1 + name.len()) as u8;
+    adv[4] = 0x09;
+    adv[5..5 + name.len()].copy_from_slice(name);
+    let prefix_len = 5 + name.len();
 
     let cap_len = unsafe {
         CAP_BuildAdvPacket(
             0, // General Announcement
             core::ptr::null(),
             0,
-            adv[3..].as_mut_ptr(),
-            (adv.len() - 3) as u8,
+            adv[prefix_len..].as_mut_ptr(),
+            (adv.len() - prefix_len) as u8,
         )
     } as usize;
-    let total_len = 3 + cap_len;
-
-    let mut scan_rsp = [0u8; 31];
-    scan_rsp[0] = (1 + name.len()) as u8;
-    scan_rsp[1] = 0x09; // Complete Local Name
-    scan_rsp[2..2 + name.len()].copy_from_slice(name);
-    let scan_rsp_len = 2 + name.len();
+    let total_len = prefix_len + cap_len;
 
     let peer_addr = [0u8; 6];
     let adv_set = Adv_Set_t {
@@ -786,10 +784,10 @@ fn start_le_audio_ext_advertising() {
         Duration: 0,
         Max_Extended_Advertising_Events: 0,
     };
-    let adv_props =
-        (HCI_ADV_EVENT_PROP_CONNECTABLE | HCI_ADV_EVENT_PROP_SCANNABLE | HCI_ADV_EVENT_PROP_LEGACY) as u16;
+    let adv_props = HCI_ADV_EVENT_PROP_CONNECTABLE as u16;
 
     unsafe {
+        let st_dphy = hci_le_set_default_phy(0x00, 0x02, 0x02);
         let st_cfg = aci_gap_adv_set_configuration(
             HCI_ADV_TYPE_ADV_IND as u8,
             0,
@@ -803,16 +801,15 @@ fn start_le_audio_ext_advertising() {
             0x00, // No filter list
             0x7F, // Host has no TX power preference
             0,
-            0x01, // Secondary PHY 1M
+            0x01, // Secondary PHY = LE 1M (discoverable by standard 1M ext scanners)
             0,
             0,
         );
         let st_data = hci_le_set_extended_advertising_data(0, 0x03, 0, total_len as u8, adv.as_ptr());
-        let st_srsp = hci_le_set_extended_scan_response_data(0, 0x03, 0, scan_rsp_len as u8, scan_rsp.as_ptr());
         let st_en = hci_le_set_extended_advertising_enable(1, 1, &adv_set);
         info!(
-            "LE Audio Adv started: cfg=0x{:02X} data=0x{:02X} srsp=0x{:02X} en=0x{:02X} (adv={}B srsp={}B)",
-            st_cfg, st_data, st_srsp, st_en, total_len, scan_rsp_len
+            "LE Audio Ext Adv (>31B) started: dphy=0x{:02X} cfg=0x{:02X} data=0x{:02X} en=0x{:02X} (adv={}B)",
+            st_dphy, st_cfg, st_data, st_en, total_len
         );
     }
 }
@@ -909,7 +906,22 @@ async fn main(spawner: Spawner) {
         if let Some(gap_event) = ble.process_event(&event).await {
             match gap_event {
                 GapEvent::Connected(conn) => {
-                    info!("Central connected: conn=0x{:04X}", conn.handle.raw());
+                    let h = conn.handle.raw();
+                    let (mut tx_phy, mut rx_phy) = (0u8, 0u8);
+                    let st_r1 = unsafe { hci_le_read_phy(h, &mut tx_phy, &mut rx_phy) };
+                    let st_set = unsafe { hci_le_set_phy(h, 0x00, 0x02, 0x02, 0) };
+                    info!(
+                        "Central connected: conn=0x{:04X}, initial PHY(st=0x{:02X}): tx={} rx={}, set_2m=0x{:02X}",
+                        h, st_r1, tx_phy, rx_phy, st_set
+                    );
+                }
+                GapEvent::PhyUpdated { handle, tx_phy, rx_phy } => {
+                    info!(
+                        "LE PHY updated: conn=0x{:04X} tx={:?} rx={:?}",
+                        handle.raw(),
+                        tx_phy,
+                        rx_phy
+                    );
                 }
                 GapEvent::Disconnected { handle, reason } => {
                     info!(
