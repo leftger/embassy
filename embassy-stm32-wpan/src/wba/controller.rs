@@ -319,6 +319,18 @@ impl<'d> bt_hci::controller::Controller for ControllerAdapter<'d> {
         })
         .await;
 
+        #[cfg(feature = "wba-ble-audio")]
+        if buf.first() == Some(&0x04) {
+            #[cfg(feature = "ble-audio-codec-mngr")]
+            crate::wba::ble_codec::on_hci_event(buf);
+
+            // Dispatch HCI/ACI event packets to ST's SVCCTL service/audio stack handlers
+            // from async executor context (mirrors CubeWBA's deferred Ble_UserEvtRx task).
+            unsafe {
+                crate::wba::bindings::ble_svc::SVCCTL_UserEvtRx(buf.as_ptr() as *mut core::ffi::c_void);
+            }
+        }
+
         ControllerToHostPacket::from_hci_bytes_complete(&buf).map_err(|_| embedded_io::ErrorKind::InvalidData)
     }
 }
@@ -391,6 +403,9 @@ impl<'d> Drop for Controller<'d> {
         );
 
         self.receiver.clear();
+
+        #[cfg(feature = "ble-audio-codec-mngr")]
+        crate::wba::codec_mngr::deinit();
 
         // Zero host stack buffers and reset the one-time LL init guard so
         // init_ble_stack() → BleStack_Init() can run cleanly on next Ble::new().

@@ -573,3 +573,19 @@ fn init_pll(config: Option<Pll>, input: &PllInput, voltage_range: VoltageScale) 
 
     PllOutput { p, q, r }
 }
+
+/// Read the current 13-bit PLL1 fractional multiplier (`PLL1FRACR.PLL1FRACN`).
+pub fn pll1_fracn() -> u16 {
+    RCC.pll1fracr().read().pllfracn()
+}
+
+/// Update `PLL1FRACR.PLL1FRACN` on the fly to fine-tune PLL1 VCO frequency (e.g. for LE Audio clock recovery).
+pub fn set_pll1_fracn(n_frac: u16) {
+    critical_section::with(|_| {
+        RCC.pll1cfgr().modify(|w| w.set_pllfracen(false));
+        RCC.pll1fracr().write(|w| w.set_pllfracn(n_frac & 0x1FFF));
+        // Latch timing per RM0515 / ST CubeWBA `CODEC_CLK_SetPLLNfrac`: wait a few cycles before re-enabling.
+        cortex_m::asm::delay(16);
+        RCC.pll1cfgr().modify(|w| w.set_pllfracen(true));
+    });
+}

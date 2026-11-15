@@ -725,6 +725,32 @@ impl<'d, W: word::Word> Sai<'d, W> {
         }
     }
 
+    /// Pause the SAI DMA ring buffer transfer.
+    ///
+    /// To resume playback/capture, refill the buffer if transmitting and call [`Self::start`].
+    pub fn stop(&mut self) {
+        match &mut self.ring_buffer {
+            RingBuffer::Writable(rb) => {
+                rb.stop();
+            }
+            RingBuffer::Readable(rb) => {
+                rb.stop();
+            }
+        }
+    }
+
+    /// Clear all buffered data and reset the SAI ring buffer indices.
+    pub fn clear(&mut self) {
+        match &mut self.ring_buffer {
+            RingBuffer::Writable(rb) => {
+                rb.clear();
+            }
+            RingBuffer::Readable(rb) => {
+                rb.clear();
+            }
+        }
+    }
+
     fn is_transmitter(ring_buffer: &RingBuffer<W>) -> bool {
         match ring_buffer {
             RingBuffer::Writable(_) => true,

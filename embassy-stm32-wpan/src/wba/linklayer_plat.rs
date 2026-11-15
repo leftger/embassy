@@ -590,7 +590,7 @@ fn priority_shift() -> u8 {
     8 - NVIC_PRIO_BITS as u8
 }
 
-fn pack_priority(raw: u32) -> u8 {
+pub(crate) fn pack_priority(raw: u32) -> u8 {
     let shift = priority_shift();
     let priority_bits = NVIC_PRIO_BITS as u32;
     let mask = if priority_bits >= 32 {
@@ -610,26 +610,27 @@ fn counter_acquire(counter: &AtomicI32) -> bool {
     counter.fetch_add(1, Ordering::SeqCst) == 0
 }
 
-unsafe fn nvic_enable(irq: u32) {
+pub(crate) unsafe fn nvic_enable(irq: u32) {
     NVIC::unmask(RawInterrupt::new(irq));
     compiler_fence(Ordering::SeqCst);
 }
 
-unsafe fn nvic_disable(irq: u32) {
+pub(crate) unsafe fn nvic_disable(irq: u32) {
     NVIC::mask(RawInterrupt::new(irq));
     compiler_fence(Ordering::SeqCst);
 }
 
-unsafe fn nvic_set_pending(irq: u32) {
+pub(crate) unsafe fn nvic_set_pending(irq: u32) {
     NVIC::pend(RawInterrupt::new(irq));
     compiler_fence(Ordering::SeqCst);
 }
 
-unsafe fn nvic_get_active(irq: u32) -> bool {
+#[allow(dead_code)]
+pub(crate) unsafe fn nvic_get_active(irq: u32) -> bool {
     NVIC::is_active(RawInterrupt::new(irq))
 }
 
-unsafe fn nvic_set_priority(irq: u32, priority: u8) {
+pub(crate) unsafe fn nvic_set_priority(irq: u32, priority: u8) {
     // STM32WBA is ARMv8-M, which uses byte-accessible IPR registers
     let nvic = &*NVIC::PTR;
     nvic.ipr[irq as usize].write(priority);

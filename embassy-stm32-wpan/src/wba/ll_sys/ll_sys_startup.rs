@@ -118,23 +118,23 @@ pub mod ble_config {
     /// Maximum number of simultaneous BLE connections
     pub const CFG_BLE_NUM_LINK: u8 = 2;
     /// Maximum ATT MTU size
-    pub const CFG_BLE_ATT_MTU_MAX: u16 = 247;
+    pub const CFG_BLE_ATT_MTU_MAX: u16 = if cfg!(feature = "wba-ble-audio") { 251 } else { 247 };
     /// Number of GATT attributes
-    pub const CFG_BLE_NUM_GATT_ATTRIBUTES: u16 = 68;
+    pub const CFG_BLE_NUM_GATT_ATTRIBUTES: u16 = if cfg!(feature = "wba-ble-audio") { 128 } else { 68 };
     /// Number of GATT services
-    pub const CFG_BLE_NUM_GATT_SERVICES: u16 = 8;
+    pub const CFG_BLE_NUM_GATT_SERVICES: u16 = if cfg!(feature = "wba-ble-audio") { 16 } else { 8 };
     /// GATT attribute value array size
-    pub const CFG_BLE_ATT_VALUE_ARRAY_SIZE: u16 = 1344;
+    pub const CFG_BLE_ATT_VALUE_ARRAY_SIZE: u16 = if cfg!(feature = "wba-ble-audio") { 4096 } else { 1344 };
     /// Prepare write list size (BLE_DEFAULT_PREP_WRITE_LIST_SIZE = BLE_PREP_WRITE_X_ATT(512) = DIVC(512,18)*2 = 58)
     pub const CFG_BLE_PREPARE_WRITE_LIST_SIZE: u8 = 58;
     /// Memory block count margin
-    pub const CFG_BLE_MBLOCK_COUNT_MARGIN: u16 = 0x15; // 21
+    pub const CFG_BLE_MBLOCK_COUNT_MARGIN: u16 = if cfg!(feature = "wba-ble-audio") { 0x30 } else { 0x15 };
     /// Maximum COC number
-    pub const CFG_BLE_COC_NBR_MAX: u8 = 0;
+    pub const CFG_BLE_COC_NBR_MAX: u8 = if cfg!(feature = "wba-ble-audio") { 64 } else { 0 };
     /// Maximum COC MPS
-    pub const CFG_BLE_COC_MPS_MAX: u16 = 0;
+    pub const CFG_BLE_COC_MPS_MAX: u16 = if cfg!(feature = "wba-ble-audio") { 248 } else { 0 };
     /// Maximum COC initiator number
-    pub const CFG_BLE_COC_INITIATOR_NBR_MAX: u8 = 0;
+    pub const CFG_BLE_COC_INITIATOR_NBR_MAX: u8 = if cfg!(feature = "wba-ble-audio") { 32 } else { 0 };
     /// Number of EATT bearers per link
     pub const CFG_BLE_EATT_BEARER_PER_LINK: u8 = 0;
     /// NVM maximum size (in 64-bit words)
@@ -197,6 +197,8 @@ pub mod ble_config {
     /// `libstm32wba_ble_stack_llo.a`.
     pub const CFG_BLE_OPTIONS: u16 = if cfg!(feature = "ble-stack-llo") {
         ble_options::LL_ONLY
+    } else if cfg!(feature = "ble-extended-adv") {
+        ble_options::DEV_NAME_READ_ONLY | ble_options::EXTENDED_ADV
     } else {
         ble_options::DEV_NAME_READ_ONLY
     };
@@ -390,6 +392,12 @@ pub fn init_ble_stack() -> Result<(), u8> {
         if status != BLE_STATUS_SUCCESS {
             error!("init_ble_stack: BleStack_Init failed with status 0x{:02X}", status);
             return Err(status);
+        }
+
+        #[cfg(feature = "wba-ble-audio")]
+        {
+            crate::wba::bindings::ble_svc::SVCCTL_Init();
+            crate::wba::audio_plat::init();
         }
 
         trace!("init_ble_stack: BleStack_Init succeeded");

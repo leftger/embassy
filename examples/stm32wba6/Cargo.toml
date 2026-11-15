@@ -32,6 +32,8 @@ bt-hci = { version = "0.11.0", optional = true }
 default = ["ble"]
 mac = ["dep:embassy-stm32-wpan", "embassy-stm32-wpan/wba-mac"]
 ble = ["dep:embassy-stm32-wpan", "embassy-stm32-wpan/wba-ble", "embassy-stm32-wpan/wb-hci", "embassy-stm32-wpan/direct", "dep:stm32wb-hci", "dep:bt-hci", "embassy-stm32-wpan/ble-stack-full", "embassy-stm32-wpan/linklayer6-ble-full"]
+ble-audio = ["ble", "embassy-stm32-wpan/ble-audio-unicast-server"]
+ble-audio-codec-mngr = ["ble-audio", "embassy-stm32-wpan/ble-audio-codec-mngr"]
 
 [profile.release]
 debug = 2
@@ -103,6 +105,10 @@ required-features = ["ble"]
 [[bin]]
 name = "ble_api_extras"
 required-features = ["ble"]
+
+[[bin]]
+name = "ble_audio_speaker"
+required-features = ["ble-audio"]
 
 [[bin]]
 name = "usb_host_serial"

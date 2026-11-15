@@ -102,6 +102,30 @@ wba = [ "dep:stm32-bindings", "stm32wb-hci?/wba_1_10_0" ]
 wba-ble = [ "stm32-bindings/wba_wpan_ble" , "stm32-bindings/wba_wpan", "stm32-bindings/wba_wpan_mac" ]
 wba-mac = [ "stm32-bindings/wba_wpan_mac", "stm32-bindings/wba_wpan_ble" , "stm32-bindings/lib_linklayer_802_15_4_v3_0", "stm32-bindings/lib_wba_mac_lib" , "stm32-bindings/wba_wpan" ]
 
+# Opt-in WBA BLE Extended Advertising & LE Audio support.
+ble-extended-adv = []
+wba-ble-audio = [
+    "wba-ble",
+    "ble-extended-adv",
+    "stm32-bindings/wba_wpan_ble_audio",
+    "stm32-bindings/wba_wpan_ble_svc",
+    "stm32-bindings/lib_ble_audio",
+    "stm32-bindings/lib_ble_audio_support",
+    "stm32-bindings/lib_lc3",
+    "stm32-bindings/lib_ble_wrap_full",
+]
+ble-audio-unicast-server = [ "wba-ble-audio", "stm32-bindings/ble-audio-unicast-server" ]
+ble-audio-unicast-client = [ "wba-ble-audio", "stm32-bindings/ble-audio-unicast-client" ]
+ble-audio-broadcast-source = [ "wba-ble-audio", "stm32-bindings/ble-audio-broadcast-source" ]
+ble-audio-broadcast-sink = [ "wba-ble-audio", "stm32-bindings/ble-audio-broadcast-sink" ]
+# Opt-in ST Codec Manager (`libcodec_mngr.a`) + `RCC->ASCR` hardware audio sync & PLL1 drift loop.
+# Compatible with `DATA_PATH_HCI_LEGACY` streams when left uninitialized or selected per stream.
+ble-audio-codec-mngr = [
+    "wba-ble-audio",
+    "stm32-bindings/wba_wpan_ll_ble_full",
+    "stm32-bindings/lib_codec_mngr",
+]
+
 # BLE stack library variants (choose one). CubeWBA 1.10.0 ships only the full
 # host stack and the link-layer-only (`llo`) variant; the old basic/basic_plus/po
 # host stacks are gone and the controller feature set is selected by the
