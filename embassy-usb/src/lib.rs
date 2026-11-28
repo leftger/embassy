@@ -47,11 +47,13 @@ mod config {
     include!(concat!(env!("OUT_DIR"), "/config.rs"));
 }
 
+#[cfg(all(feature = "device", feature = "msos"))]
+pub use device::msos;
 #[cfg(feature = "device")]
 pub use device::{
     Builder, CONFIGURATION_NONE, CONFIGURATION_VALUE, Config, EndpointOptions, FunctionBuilder, Handler, HandlerFull,
     InterfaceAltBuilder, InterfaceBuilder, InterfaceHandler, RemoteWakeupError, UsbBufferReport, UsbDevice,
-    UsbDeviceSpeed, UsbDeviceState, UsbVersion, msos,
+    UsbDeviceSpeed, UsbDeviceState, UsbVersion,
 };
 #[cfg(feature = "device")]
 pub use driver::EndpointInterval;

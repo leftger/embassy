@@ -2,6 +2,7 @@
 
 mod builder;
 mod descriptor_reader;
+#[cfg(feature = "msos")]
 pub mod msos;
 
 #[cfg(any(test, all(feature = "test-utils", not(target_os = "none"))))]
@@ -387,6 +388,7 @@ struct Inner<'d> {
     #[cfg(feature = "high-speed")]
     other_speed_config_descriptor: Option<&'d [u8]>,
     bos_descriptor: &'d [u8],
+    #[cfg(feature = "msos")]
     msos_descriptor: crate::msos::MsOsDescriptorSet<'d>,
 
     device_state: UsbDeviceState,
@@ -500,7 +502,10 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
         UsbBufferReport {
             config_descriptor_used: self.inner.config_descriptor.len(),
             bos_descriptor_used: self.inner.bos_descriptor.len(),
+            #[cfg(feature = "msos")]
             msos_descriptor_used: self.inner.msos_descriptor.len(),
+            #[cfg(not(feature = "msos"))]
+            msos_descriptor_used: 0,
             control_buffer_size: self.control_buf.len(),
         }
     }
@@ -1159,15 +1164,15 @@ impl<'d> Inner<'d> {
             },
 
             (RequestType::Vendor, Recipient::Device) => {
+                #[cfg(feature = "msos")]
                 if !self.msos_descriptor.is_empty()
                     && req.request == self.msos_descriptor.vendor_code()
                     && req.index == 7
                 {
                     // Index 7 retrieves the MS OS Descriptor Set
-                    InResponse::Accepted(self.msos_descriptor.descriptor())
-                } else {
-                    self.handle_control_in_delegated(req, buf)
+                    return InResponse::Accepted(self.msos_descriptor.descriptor());
                 }
+                self.handle_control_in_delegated(req, buf)
             }
             _ => self.handle_control_in_delegated(req, buf),
         }
@@ -1207,6 +1212,9 @@ impl<'d> Inner<'d> {
         }
 
         match dtype {
+            // A BOS descriptor only exists when something fills it in: USB 3.x
+            // capabilities, MS OS descriptors, or a WebUSB platform capability.
+            #[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
             descriptor_type::BOS => InResponse::Accepted(self.bos_descriptor),
             // USB 2.0 §9.4.3: device and configuration descriptors use index 0.
             // Any other index does not exist.

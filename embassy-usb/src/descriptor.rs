@@ -452,11 +452,16 @@ pub(crate) fn control_max_packet_size(config: &Config) -> u16 {
 }
 
 /// A writer for Binary Object Store descriptor.
+#[cfg_attr(
+    not(any(feature = "superspeed", feature = "msos", feature = "class-web-usb")),
+    allow(dead_code)
+)]
 pub struct BosWriter<'a> {
     pub(crate) writer: DescriptorWriter<'a>,
     num_caps_mark: Option<usize>,
 }
 
+#[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
 impl<'a> BosWriter<'a> {
     pub(crate) const fn new(writer: DescriptorWriter<'a>) -> Self {
         Self {

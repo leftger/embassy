@@ -59,6 +59,12 @@ check --features device,host,class-all,high-speed,log,block-device-driver
 check --features device,class-cdc-acm
 check --features device,host,class-all
 
+# MS OS 2.0 support. `class-vendor`, `class-mtp` and `class-cmsis-dap-v2` pull it
+# in, so the `class-all` rows above already cover it; these cover it stand-alone
+# and the case where nothing needs a BOS descriptor.
+check --features device,class-cdc-acm,msos
+check --features device,host,msos
+
 # USB 3.x support is opt-in; make sure it still builds alongside a device class.
 check --features device,class-cdc-acm,superspeed
 check --features device,host,class-all,superspeed,defmt

@@ -5,8 +5,11 @@ use super::{
     STRING_INDEX_CUSTOM_START, UsbDevice, UsbDeviceState,
 };
 use crate::config::MAX_HANDLER_COUNT;
-use crate::descriptor::{self, BosWriter, DescriptorWriter, SynchronizationType, UsageType};
+#[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
+use crate::descriptor::BosWriter;
+use crate::descriptor::{self, DescriptorWriter, SynchronizationType, UsageType};
 use crate::driver::{Driver, Endpoint, EndpointAddress, EndpointInfo, EndpointInterval, EndpointType};
+#[cfg(feature = "msos")]
 use crate::msos::{DeviceLevelDescriptor, FunctionLevelDescriptor, MsOsDescriptorWriter};
 use crate::types::{InterfaceNumber, StringIndex};
 
@@ -270,8 +273,10 @@ pub struct Builder<'d, D: Driver<'d>> {
     other_speed_config_descriptor_buf: Option<&'d mut [u8]>,
     #[cfg(feature = "high-speed")]
     other_speed_patches: Vec<OtherSpeedPatch, 32>,
+    #[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
     bos_descriptor: BosWriter<'d>,
 
+    #[cfg(feature = "msos")]
     msos_descriptor: MsOsDescriptorWriter<'d>,
 }
 
@@ -352,11 +357,21 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
             }
         }
 
+        // The BOS descriptor is only filled in by USB 3.x capabilities, MS OS descriptors
+        // and the WebUSB platform capability. Without any of those there is nothing to put
+        // in it, so the writer and the request handling are compiled out. The caller's
+        // buffer is simply unused; passing a spare one stays harmless.
+        let _ = bos_descriptor_buf;
+        let _ = msos_descriptor_buf;
+
         let mut config_descriptor = DescriptorWriter::new(config_descriptor_buf);
+        #[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
         let mut bos_descriptor = BosWriter::new(DescriptorWriter::new(bos_descriptor_buf));
 
         config_descriptor.configuration(&config);
+        #[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
         bos_descriptor.bos();
+        #[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
         if superspeed {
             bos_descriptor.superspeed_capabilities(&config);
         }
@@ -374,8 +389,10 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
             other_speed_config_descriptor_buf: None,
             #[cfg(feature = "high-speed")]
             other_speed_patches: Vec::new(),
+            #[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
             bos_descriptor,
 
+            #[cfg(feature = "msos")]
             msos_descriptor: MsOsDescriptorWriter::new(msos_descriptor_buf),
         }
     }
@@ -403,7 +420,9 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
             driver,
             next_string_index: _,
             mut config_descriptor,
+            #[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
             mut bos_descriptor,
+            #[cfg(feature = "msos")]
             msos_descriptor,
             #[cfg(feature = "high-speed")]
             other_speed_config_descriptor_buf,
@@ -411,13 +430,19 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
             other_speed_patches,
         } = self;
 
+        #[cfg(feature = "msos")]
         let msos_descriptor = msos_descriptor.build(&mut bos_descriptor);
 
         config_descriptor.end_configuration();
         let config_descriptor = config_descriptor.into_buf();
 
-        bos_descriptor.end_bos();
-        let bos_descriptor = bos_descriptor.writer.into_buf();
+        #[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
+        let bos_descriptor = {
+            bos_descriptor.end_bos();
+            bos_descriptor.writer.into_buf()
+        };
+        #[cfg(not(any(feature = "superspeed", feature = "msos", feature = "class-web-usb")))]
+        let bos_descriptor: &'d [u8] = &[];
 
         #[cfg(feature = "high-speed")]
         let other_speed_config_descriptor: Option<&'d [u8]> = if let Some(buf) = other_speed_config_descriptor_buf {
@@ -458,6 +483,7 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
         // Log the number of allocator bytes actually used in descriptor buffers
         trace!("USB: config_descriptor used: {}", config_descriptor.len());
         trace!("USB: bos_descriptor used: {}", bos_descriptor.len());
+        #[cfg(feature = "msos")]
         trace!("USB: msos_descriptor used: {}", msos_descriptor.len());
         trace!("USB: control_buf size: {}", control_buf.len());
 
@@ -480,6 +506,7 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
                 #[cfg(feature = "high-speed")]
                 other_speed_config_descriptor,
                 bos_descriptor,
+                #[cfg(feature = "msos")]
                 msos_descriptor,
 
                 device_state: UsbDeviceState::Unpowered,
@@ -622,17 +649,20 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
     /// Add an MS OS 2.0 Descriptor Set.
     ///
     /// Panics if called more than once.
+    #[cfg(feature = "msos")]
     pub fn msos_descriptor(&mut self, windows_version: u32, vendor_code: u8) {
         self.msos_descriptor.header(windows_version, vendor_code);
     }
 
     /// Add an MS OS 2.0 Device Level Feature Descriptor.
+    #[cfg(feature = "msos")]
     pub fn msos_feature<T: DeviceLevelDescriptor>(&mut self, desc: T) {
         self.msos_descriptor.device_feature(desc);
     }
 
     /// Gets the underlying [`MsOsDescriptorWriter`] to allow adding subsets and features for classes that
     /// do not add their own.
+    #[cfg(feature = "msos")]
     pub fn msos_writer(&mut self) -> &mut MsOsDescriptorWriter<'d> {
         &mut self.msos_descriptor
     }
@@ -647,11 +677,13 @@ pub struct FunctionBuilder<'a, 'd, D: Driver<'d>> {
     builder: &'a mut Builder<'d, D>,
     iface_count_index: Option<usize>,
 
+    #[cfg_attr(not(feature = "msos"), allow(dead_code))]
     first_interface: InterfaceNumber,
 }
 
 impl<'a, 'd, D: Driver<'d>> Drop for FunctionBuilder<'a, 'd, D> {
     fn drop(&mut self) {
+        #[cfg(feature = "msos")]
         self.builder.msos_descriptor.end_function();
     }
 }
@@ -685,6 +717,7 @@ impl<'a, 'd, D: Driver<'d>> FunctionBuilder<'a, 'd, D> {
     }
 
     /// Add an MS OS 2.0 Function Level Feature Descriptor.
+    #[cfg(feature = "msos")]
     pub fn msos_feature<T: FunctionLevelDescriptor>(&mut self, desc: T) {
         if !self.builder.msos_descriptor.is_in_config_subset() {
             self.builder.msos_descriptor.configuration(0);
@@ -787,6 +820,7 @@ impl<'a, 'd, D: Driver<'d>> InterfaceAltBuilder<'a, 'd, D> {
     }
 
     /// Add a custom Binary Object Store (BOS) descriptor to this alternate setting.
+    #[cfg(any(feature = "superspeed", feature = "msos", feature = "class-web-usb"))]
     pub fn bos_capability(&mut self, capability_type: u8, capability: &[u8]) {
         self.builder.bos_descriptor.capability(capability_type, capability);
     }

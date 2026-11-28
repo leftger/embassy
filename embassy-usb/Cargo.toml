@@ -80,13 +80,13 @@ class-uac = []
 # Device-only classes.
 class-bth = ["device"]
 class-cdc-ncm = ["device", "dep:embassy-net-driver-channel"]
-class-cmsis-dap-v2 = ["device"]
+class-cmsis-dap-v2 = ["device", "msos"]
 class-dfu = ["device", "dep:embassy-time"]
 class-gud = ["device"]
-class-mtp = ["device"]
+class-mtp = ["device", "msos"]
 class-usbtmc = ["device"]
 class-uvc = ["device"]
-class-vendor = ["device", "embedded-io"]
+class-vendor = ["device", "embedded-io", "msos"]
 class-web-usb = ["device"]
 
 # Host-only classes.
@@ -97,6 +97,13 @@ class-vcp = ["host", "class-cdc-acm"]
 # Enables the `embedded-io-async` trait implementations and the shared
 # `ClassError` mapping. Pulled in by the classes that use it.
 embedded-io = ["dep:embedded-io-async"]
+
+# Microsoft OS 2.0 descriptors: the `msos` module, the `Builder::msos_descriptor` /
+# `msos_feature` / `msos_writer` API and the BOS platform capability that carries
+# them. Only needed for WinUSB / WebUSB device properties; it costs about 1.5 KB of
+# flash on a Cortex-M0+. Not a default feature, but `class-vendor`, `class-mtp` and
+# `class-cmsis-dap-v2` enable it, so a default (`class-all`) build still has it.
+msos = []
 
 # High-speed (480 Mbit/s) descriptor support: the `DEVICE_QUALIFIER` and
 # `OTHER_SPEED_CONFIGURATION` descriptors and their control requests. On by
