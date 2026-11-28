@@ -399,6 +399,7 @@ fn interface_requests_require_configured_state() {
     });
 }
 
+#[cfg(feature = "high-speed")]
 #[test]
 fn get_descriptor_rejects_nonzero_index() {
     with_device_fullspeed(|usb| {
@@ -1108,6 +1109,7 @@ fn routed_handlers_only_see_their_interfaces() {
     assert_eq!(b_alts.get(), 1);
 }
 
+#[cfg(feature = "high-speed")]
 #[test]
 fn test_endpoint_interval_and_other_speed_config() {
     let mut config_descriptor = [0; 256];
@@ -1279,6 +1281,7 @@ fn test_endpoint_interval_and_other_speed_config() {
     ));
 }
 
+#[cfg(feature = "high-speed")]
 #[test]
 fn test_other_speed_config_rejected_on_full_speed_or_missing_buffer() {
     let mut config_descriptor = [0; 256];
@@ -1342,6 +1345,7 @@ fn test_other_speed_config_rejected_on_full_speed_or_missing_buffer() {
 }
 
 #[cfg(feature = "superspeed")]
+#[cfg(feature = "high-speed")]
 #[test]
 fn test_manual_raw_descriptor_opt_out() {
     let mut config_descriptor = [0; 256];
@@ -1616,6 +1620,7 @@ fn test_endpoint_options() {
 }
 
 #[cfg(feature = "superspeed")]
+#[cfg(feature = "high-speed")]
 #[test]
 fn test_bulk_max_packet_size() {
     let full_32 = || {
@@ -1657,6 +1662,7 @@ fn test_bulk_max_packet_size() {
     }
 }
 
+#[cfg(feature = "high-speed")]
 #[test]
 #[should_panic(expected = "bulk endpoints require a max_packet_size of 512")]
 fn test_bulk_max_packet_size_high_speed() {
@@ -1966,6 +1972,7 @@ fn build_midi_with_packet_size(max_speed: UsbDeviceSpeed, max_packet_size: u16) 
     let _midi = MidiClass::new(&mut builder, midi_config);
 }
 
+#[cfg(feature = "high-speed")]
 #[test]
 fn midi_bulk_packet_size_follows_the_device_speed() {
     build_midi_with_packet_size(UsbDeviceSpeed::Full, 64);
@@ -1973,6 +1980,7 @@ fn midi_bulk_packet_size_follows_the_device_speed() {
     build_midi_with_packet_size(UsbDeviceSpeed::High, 512);
 }
 
+#[cfg(feature = "high-speed")]
 #[test]
 #[should_panic(expected = "bulk endpoints require a max_packet_size of 512")]
 fn midi_default_packet_size_is_refused_at_high_speed() {
@@ -2276,6 +2284,7 @@ fn midi2_output_only_omits_the_unused_endpoint() {
     assert_eq!(alt1_endpoints.as_slice(), &[(0x81, 7)]);
 }
 
+#[cfg(feature = "high-speed")]
 #[test]
 fn test_high_speed_additional_transactions_descriptor() {
     let mut options = EndpointOptions::new();

@@ -30,7 +30,7 @@ target = "thumbv7em-none-eabi"
 features = ["defmt", "block-device-driver"]
 
 [features]
-default = ["device", "host", "class-all"]
+default = ["device", "host", "class-all", "high-speed"]
 
 # Roles. `device` and `host` are independent; a class feature only compiles the
 # submodules for the roles that are enabled.
@@ -98,12 +98,19 @@ class-vcp = ["host", "class-cdc-acm"]
 # `ClassError` mapping. Pulled in by the classes that use it.
 embedded-io = ["dep:embedded-io-async"]
 
+# High-speed (480 Mbit/s) descriptor support: the `DEVICE_QUALIFIER` and
+# `OTHER_SPEED_CONFIGURATION` descriptors and their control requests. On by
+# default. Full-speed-only devices (rp2040, nRF52840, STM32F1, ...) can disable
+# default features and select the classes they need to drop it; setting
+# `Config::max_speed` above `Full` without this feature panics in `Builder::new`.
+high-speed = []
+
 # USB 3.x device support: SuperSpeed / SuperSpeedPlus descriptors and the USB 3.x
 # control requests (`SET_SEL`, `SET_ISOCH_DELAY`, U1/U2/LTM). Full- and high-speed
 # devices don't need it and shouldn't pay for it, so it is off by default.
 # Setting `Config::max_speed` to `Super` or `SuperPlus` without this feature
 # panics in `Builder::new`.
-superspeed = []
+superspeed = ["high-speed"]
 
 defmt = ["dep:defmt", "embassy-usb-driver/defmt", "heapless/defmt"]
 log = ["dep:log"]

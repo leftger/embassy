@@ -50,8 +50,14 @@ check --features host,embedded-io
 check --features test-utils
 
 # Logging backends and the full class set.
-check --features device,host,class-all,defmt,block-device-driver
-check --features device,host,class-all,log,block-device-driver
+check --features device,host,class-all,high-speed,defmt,block-device-driver
+check --features device,host,class-all,high-speed,log,block-device-driver
+
+# Full-speed-only builds (no `high-speed`, i.e. no DEVICE_QUALIFIER or
+# OTHER_SPEED_CONFIGURATION descriptors). `high-speed` is a default feature, so
+# this is what a `default-features = false` user gets.
+check --features device,class-cdc-acm
+check --features device,host,class-all
 
 # USB 3.x support is opt-in; make sure it still builds alongside a device class.
 check --features device,class-cdc-acm,superspeed

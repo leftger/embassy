@@ -426,6 +426,7 @@ pub(crate) fn device_descriptor(config: &Config) -> [u8; 18] {
 ///
 /// All device qualifier descriptors are always 10 bytes, so there's no need for
 /// a variable-length buffer or DescriptorWriter.
+#[cfg(feature = "high-speed")]
 pub(crate) fn device_qualifier_descriptor(config: &Config) -> [u8; 10] {
     [
         10,   // bLength

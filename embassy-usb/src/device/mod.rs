@@ -381,8 +381,10 @@ pub struct UsbDevice<'d, D: Driver<'d>> {
 struct Inner<'d> {
     config: Config<'d>,
     device_descriptor: [u8; 18],
+    #[cfg(feature = "high-speed")]
     device_qualifier_descriptor: [u8; 10],
     config_descriptor: &'d [u8],
+    #[cfg(feature = "high-speed")]
     other_speed_config_descriptor: Option<&'d [u8]>,
     bos_descriptor: &'d [u8],
     msos_descriptor: crate::msos::MsOsDescriptorSet<'d>,
@@ -1266,9 +1268,11 @@ impl<'d> Inner<'d> {
                     }
                 }
             }
+            #[cfg(feature = "high-speed")]
             descriptor_type::DEVICE_QUALIFIER if self.config.max_speed == UsbDeviceSpeed::High && index == 0 => {
                 InResponse::Accepted(&self.device_qualifier_descriptor)
             }
+            #[cfg(feature = "high-speed")]
             descriptor_type::OTHER_SPEED_CONFIGURATION
                 if self.config.max_speed > UsbDeviceSpeed::Full && index == 0 =>
             {

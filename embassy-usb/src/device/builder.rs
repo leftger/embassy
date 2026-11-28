@@ -248,6 +248,7 @@ impl<'a> Config<'a> {
     }
 }
 
+#[cfg(feature = "high-speed")]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OtherSpeedPatch {
     pub offset: u16,
@@ -265,7 +266,9 @@ pub struct Builder<'d, D: Driver<'d>> {
     next_string_index: u8,
 
     config_descriptor: DescriptorWriter<'d>,
+    #[cfg(feature = "high-speed")]
     other_speed_config_descriptor_buf: Option<&'d mut [u8]>,
+    #[cfg(feature = "high-speed")]
     other_speed_patches: Vec<OtherSpeedPatch, 32>,
     bos_descriptor: BosWriter<'d>,
 
@@ -307,6 +310,15 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
         let superspeed = config.max_speed >= UsbDeviceSpeed::Super;
         #[cfg(not(feature = "superspeed"))]
         let superspeed = false;
+
+        // Same treatment for the high-speed descriptors (`DEVICE_QUALIFIER` and the
+        // `OTHER_SPEED_CONFIGURATION` fallback). Full-speed-only parts never answer those
+        // requests, so they don't need the code or the patch table that goes with it.
+        #[cfg(not(feature = "high-speed"))]
+        assert!(
+            config.max_speed == UsbDeviceSpeed::Full,
+            "`Config::max_speed` is High, Super or SuperSpeedPlus, but embassy-usb was built without the `high-speed` feature"
+        );
 
         if superspeed {
             assert!(
@@ -358,7 +370,9 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
             next_string_index: STRING_INDEX_CUSTOM_START,
 
             config_descriptor,
+            #[cfg(feature = "high-speed")]
             other_speed_config_descriptor_buf: None,
+            #[cfg(feature = "high-speed")]
             other_speed_patches: Vec::new(),
             bos_descriptor,
 
@@ -373,6 +387,7 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
     /// `GET_DESCRIPTOR` for `OTHER_SPEED_CONFIGURATION`.
     ///
     /// The buffer must be at least as large as the configuration descriptor.
+    #[cfg(feature = "high-speed")]
     pub fn other_speed_config_descriptor(&mut self, buf: &'d mut [u8]) -> &mut Self {
         self.other_speed_config_descriptor_buf = Some(buf);
         self
@@ -390,7 +405,9 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
             mut config_descriptor,
             mut bos_descriptor,
             msos_descriptor,
+            #[cfg(feature = "high-speed")]
             other_speed_config_descriptor_buf,
+            #[cfg(feature = "high-speed")]
             other_speed_patches,
         } = self;
 
@@ -402,6 +419,7 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
         bos_descriptor.end_bos();
         let bos_descriptor = bos_descriptor.writer.into_buf();
 
+        #[cfg(feature = "high-speed")]
         let other_speed_config_descriptor: Option<&'d [u8]> = if let Some(buf) = other_speed_config_descriptor_buf {
             if config.max_speed == UsbDeviceSpeed::High {
                 assert!(
@@ -423,7 +441,13 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
         } else {
             None
         };
+        #[cfg(not(feature = "high-speed"))]
+        #[allow(unused_variables)]
+        let other_speed_config_descriptor: Option<&'d [u8]> = None;
 
+        // Without the `high-speed` feature `max_speed` is asserted to be `Full` in
+        // `Builder::new`, so there is nothing to check here.
+        #[cfg(feature = "high-speed")]
         if config.max_speed == UsbDeviceSpeed::High {
             assert!(
                 config.max_packet_size_0 == 64,
@@ -441,6 +465,7 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
         // This prevent further allocation by consuming the driver.
         let bus = driver.start(descriptor::control_max_packet_size(&config));
         let device_descriptor = descriptor::device_descriptor(&config);
+        #[cfg(feature = "high-speed")]
         let device_qualifier_descriptor = descriptor::device_qualifier_descriptor(&config);
 
         UsbDevice {
@@ -449,8 +474,10 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
             inner: Inner {
                 config,
                 device_descriptor,
+                #[cfg(feature = "high-speed")]
                 device_qualifier_descriptor,
                 config_descriptor,
+                #[cfg(feature = "high-speed")]
                 other_speed_config_descriptor,
                 bos_descriptor,
                 msos_descriptor,
@@ -488,6 +515,9 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
 
     /// The max packet size of a bulk endpoint with `options` at [`Config::max_speed`].
     pub(crate) fn bulk_max_packet_size(&self, options: EndpointOptions) -> u16 {
+        #[cfg(not(feature = "high-speed"))]
+        let max = 64;
+        #[cfg(feature = "high-speed")]
         let max = match self.config.max_speed {
             UsbDeviceSpeed::Full => 64,
             UsbDeviceSpeed::High => 512,
@@ -791,8 +821,10 @@ impl<'a, 'd, D: Driver<'d>> InterfaceAltBuilder<'a, 'd, D> {
         usage_type: UsageType,
         extra_fields: &[u8],
     ) {
-        let max_speed = self.builder.config.max_speed;
-        let b_interval = match max_speed {
+        #[cfg(not(feature = "high-speed"))]
+        let b_interval = interval.full_speed_b_interval(endpoint.ep_type);
+        #[cfg(feature = "high-speed")]
+        let b_interval = match self.builder.config.max_speed {
             UsbDeviceSpeed::Full => interval.full_speed_b_interval(endpoint.ep_type),
             // SuperSpeed periodic endpoints use the high-speed `bInterval` encoding, in 125 us bus intervals.
             UsbDeviceSpeed::High | UsbDeviceSpeed::Super | UsbDeviceSpeed::SuperPlus => {
@@ -800,6 +832,7 @@ impl<'a, 'd, D: Driver<'d>> InterfaceAltBuilder<'a, 'd, D> {
             }
         };
 
+        #[cfg(feature = "high-speed")]
         let interval_offset = (self.builder.config_descriptor.position() + 6) as u16;
 
         self.builder.config_descriptor.endpoint_raw(
@@ -810,7 +843,10 @@ impl<'a, 'd, D: Driver<'d>> InterfaceAltBuilder<'a, 'd, D> {
             extra_fields,
         );
 
-        if max_speed == UsbDeviceSpeed::High {
+        // Remember the full-speed `bInterval` so the OTHER_SPEED_CONFIGURATION
+        // descriptor can be built from this one at `build()` time.
+        #[cfg(feature = "high-speed")]
+        if self.builder.config.max_speed == UsbDeviceSpeed::High {
             let fs_interval = interval.full_speed_b_interval(endpoint.ep_type);
             if fs_interval != b_interval {
                 let _ = self.builder.other_speed_patches.push(OtherSpeedPatch {
